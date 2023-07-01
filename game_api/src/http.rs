@@ -1,10 +1,10 @@
 use crate::xml;
 use deadpool_redis::redis::AsyncCommands;
+use records_lib::escape::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{mysql, FromRow};
 use std::vec::Vec;
 use warp::Filter;
-use records_lib::escape::*;
 
 #[derive(Deserialize)]
 pub struct OverviewQuery {
@@ -94,7 +94,6 @@ pub fn warp_routes(
         .and_then(player_finished)
         .with(warp::trace::named("player-finished"));
 
-
     let compat_prefix = warp::path("api");
 
     // GET /api/Records/overview?mapId=XXXXX&playerId=XXXXXX
@@ -140,7 +139,10 @@ pub fn warp_routes(
         .with(warp::trace::named("player-finished"));
 
     let compat_routes = compat_prefix.and(
-        compat_overview.or(compat_update_player).or(compat_update_map).or(compat_player_finished)
+        compat_overview
+            .or(compat_update_player)
+            .or(compat_update_map)
+            .or(compat_player_finished),
     );
 
     new_overview
@@ -209,72 +211,27 @@ async fn append_range(
 }
 
 async fn overview(
-    db: records_lib::Database, query: OverviewQuery,
+    _db: records_lib::Database, _query: OverviewQuery,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let mut redis_conn = db.redis_pool.get().await.unwrap();
-
-    // Insert map and player if they dont exist yet
-    let map_id = records_lib::select_or_insert_map(&db, &query.map_game_id).await?;
-    let player_id = records_lib::select_or_insert_player(&db, &query.player_login).await?;
-
-    // Update redis if needed
-    let key = format!("l0:{}", query.map_game_id);
-    let count = records_lib::update_redis_leaderboard(&db, &key, map_id).await? as u32;
-
-    let mut ranked_records: Vec<RankedRecord> = vec![];
-
-    // -- Compute display ranges
-    const ROWS: u32 = 15;
-
-    let player_rank: Option<i64> = redis_conn.zrank(&key, player_id).await.unwrap();
-    let player_rank = player_rank.map(|r: i64| (r as u64) as u32);
-
-    let mut start: u32 = 0;
-    let mut end: u32;
-
-    if let Some(player_rank) = player_rank {
-        // The player has a record and is in top ROWS, display ROWS records
-        if player_rank < ROWS {
-            end = ROWS;
-            append_range(&db, &mut ranked_records, map_id, &key, start, end).await;
-        }
-        // The player is not in the top ROWS records, display top3 and then center around the player rank
-        else {
-            // push top3
-            end = 3;
-            append_range(&db, &mut ranked_records, map_id, &key, start, end).await;
-
-            // the rest is centered around the player
-            let row_minus_top3 = ROWS - 3;
-            start = player_rank - row_minus_top3 / 2;
-            end = player_rank + row_minus_top3 / 2;
-            if end >= count {
-                start -= end - count;
-                end = count;
-            }
-            append_range(&db, &mut ranked_records, map_id, &key, start, end).await;
-        }
-    }
-    // The player has no record, so ROWS = ROWS - 1 to keep one last line for the player
-    else {
-        // There is more than ROWS record + top3,
-        // So display all top ROWS records and then the last 3
-        if count > (ROWS - 1) {
-            // top (ROWS - 1- 3)
-            end = (ROWS - 1) - 3;
-            append_range(&db, &mut ranked_records, map_id, &key, start, end).await;
-
-            // last 3
-            start = count - 3;
-            end = count;
-            append_range(&db, &mut ranked_records, map_id, &key, start, end).await;
-        }
-        // There is enough records to display them all
-        else {
-            end = ROWS - 1;
-            append_range(&db, &mut ranked_records, map_id, &key, start, end).await;
-        }
-    }
+    let ranked_records = [
+        "Hey there!",
+        "The Obstacle gamemode",
+        "released a new edition!",
+        "$f00DO NOT finish this map!",
+        "Your records will not",
+        "be saved!",
+        "Update to the new",
+        "edition or contact",
+        "the server owner.",
+    ]
+    .iter()
+    .map(|msg| RankedRecord {
+        rank: 0,
+        player_login: String::new(),
+        nickname: (*msg).to_owned(),
+        time: 0,
+    })
+    .collect::<Vec<_>>();
 
     Ok(xml::reply::xml_elements(&ranked_records))
 }
@@ -347,7 +304,7 @@ async fn player_finished(
         player_id,
         body.time,
         body.respawn_count,
-        body.flags.unwrap_or(0)
+        body.flags.unwrap_or(0),
     )
     .await?;
 

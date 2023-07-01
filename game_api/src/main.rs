@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let mysql_pool = mysql::MySqlPoolOptions::new()
         .connect_timeout(Duration::new(10, 0))
         // .connect("mysql://vincent:vincent@10.0.0.1/test2")
-        .connect("mysql://root:root@localhost/obstacle_records")
+        .connect("mysql://root:root@localhost:3306/tmp_obs_records")
         .await?;
 
     let redis_pool = {
