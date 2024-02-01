@@ -1,16 +1,16 @@
 use actix_web::web::Json;
 use chrono::Utc;
 use deadpool_redis::redis::AsyncCommands;
+use records_lib::{
+    models::{self, Map, Record},
+    redis_key::map_key,
+    update_ranks::{get_rank_or_full_update, update_leaderboard},
+    Database, GetSqlFragments,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Connection;
 
-use crate::{
-    graphql::get_rank_or_full_update,
-    models::{self, Map, Record},
-    must, redis,
-    utils::format_map_key,
-    Database, GetSqlFragments, RecordsErrorKind, RecordsResult,
-};
+use crate::{RecordsErrorKind, RecordsResult, RecordsResultExt};
 
 #[derive(Deserialize, Debug)]
 pub struct HasFinishedBody {
@@ -46,7 +46,7 @@ async fn send_query(
     map_id: u32,
     player_id: u32,
     body: InsertRecordParams,
-) -> RecordsResult<u32> {
+) -> records_lib::error::RecordsResult<u32> {
     let now = Utc::now().naive_utc();
 
     let record_id: u32 = sqlx::query_scalar(
@@ -90,17 +90,17 @@ async fn insert_record(
     body: &InsertRecordParams,
     event: Option<&(models::Event, models::EventEdition)>,
 ) -> RecordsResult<u32> {
-    let mysql_conn = &mut db.mysql_pool.acquire().await?;
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err()?;
     let redis_conn = &mut db.redis_pool.get().await?;
 
-    let key = format_map_key(*map_id, event);
+    let key = map_key(*map_id, event);
     let added: Option<i64> = redis_conn.zadd(key, player_id, body.time).await.ok();
     if added.is_none() {
-        let _count = redis::update_leaderboard((mysql_conn, redis_conn), map, event).await?;
+        let _count = update_leaderboard((mysql_conn, redis_conn), map, event).await?;
     }
 
     let body = body.clone();
-    let mysql_conn = &mut db.mysql_pool.acquire().await?;
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err()?;
     let map_id = *map_id;
 
     let record_id = mysql_conn
@@ -122,13 +122,13 @@ pub async fn finished(
     event: Option<&(models::Event, models::EventEdition)>,
 ) -> RecordsResult<FinishedOutput> {
     // First, we retrieve all what we need to save the record
-    let player_id = must::have_player(db, &login).await?.id;
+    let player_id = records_lib::must::have_player(&db.mysql_pool, &login).await?.id;
     let ref map @ Map {
         id: map_id,
         cps_number,
         reversed,
         ..
-    } = must::have_map(&db.mysql_pool, &body.map_uid).await?;
+    } = records_lib::must::have_map(&db.mysql_pool, &body.map_uid).await?;
     let reversed = reversed.unwrap_or(false);
 
     let params = InsertRecordParams {
@@ -167,7 +167,7 @@ pub async fn finished(
         query = query.bind(event.id).bind(edition.id);
     }
 
-    let old_record = query.fetch_optional(&db.mysql_pool).await?;
+    let old_record = query.fetch_optional(&db.mysql_pool).await.with_api_err()?;
 
     let (old, new, has_improved) = if let Some(Record { time: old, .. }) = old_record {
         let improved = if reversed {
@@ -191,17 +191,19 @@ pub async fn finished(
             cps_number: original_cps_number,
             reversed: original_reversed,
             ..
-        } = must::have_map(&db.mysql_pool, &original_uid).await?;
+        } = records_lib::must::have_map(&db.mysql_pool, &original_uid).await?;
 
         if cps_number == original_cps_number && reversed == original_reversed.unwrap_or(false) {
             insert_record(db, map, player_id, &params, None).await?;
         } else {
-            return Err(RecordsErrorKind::MapNotFound(original_uid));
+            return Err(RecordsErrorKind::from(
+                records_lib::error::RecordsError::MapNotFound(original_uid),
+            ));
         }
     }
 
     let redis_conn = &mut db.redis_pool.get().await?;
-    let mysql_conn = &mut db.mysql_pool.acquire().await?;
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err()?;
     let current_rank = get_rank_or_full_update(
         (mysql_conn, redis_conn),
         map,

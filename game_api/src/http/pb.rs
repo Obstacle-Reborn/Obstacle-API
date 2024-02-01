@@ -3,11 +3,12 @@ use actix_web::{
     Responder,
 };
 use futures::StreamExt;
+use records_lib::{models, Database, GetSqlFragments};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use tracing_actix_web::RequestId;
 
-use crate::{models, utils::json, Database, FitRequestId, GetSqlFragments, RecordsResponse};
+use crate::{utils::json, FitRequestId, RecordsResponse, RecordsResultExt};
 
 #[derive(Deserialize)]
 pub struct PbBody {
@@ -85,7 +86,7 @@ pub async fn pb(
         rs_count,
         cp_num,
         time,
-    }) = times.next().await.transpose().fit(req_id)?
+    }) = times.next().await.transpose().with_api_err().fit(req_id)?
     {
         res.rs_count = rs_count;
         res.cps_times.push(PbCpTimesResponseItem { cp_num, time });

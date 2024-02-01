@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_graphql::{Scalar, ScalarType};
+use deadpool_redis::redis::ToRedisArgs;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sqlx::{Database, Decode};
@@ -40,6 +41,15 @@ fn escape(s: String) -> String {
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(from = "String")]
 pub struct Escaped(pub String);
+
+impl ToRedisArgs for Escaped {
+    fn write_redis_args<W>(&self, out: &mut W)
+    where
+        W: ?Sized + deadpool_redis::redis::RedisWrite,
+    {
+        self.0.write_redis_args(out)
+    }
+}
 
 impl<'r, DB: Database> Decode<'r, DB> for Escaped
 where

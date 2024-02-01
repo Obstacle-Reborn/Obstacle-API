@@ -4,8 +4,6 @@ use async_graphql::{Enum, SimpleObject};
 use serde::Serialize;
 use sqlx::{mysql::MySqlRow, FromRow, Row};
 
-use crate::RecordsErrorKind;
-
 #[derive(Serialize, FromRow, Clone, Debug)]
 pub struct Player {
     pub id: u32,
@@ -47,10 +45,19 @@ pub struct Record {
     pub try_count: Option<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RankedRecord {
     pub rank: i32,
     pub record: Record,
+}
+
+/// This is the type returned from the `global_records` SQL view.
+#[derive(FromRow)]
+pub struct RecordAttr {
+    #[sqlx(flatten)]
+    pub record: Record,
+    #[sqlx(flatten)]
+    pub map: Map,
 }
 
 #[derive(Serialize, FromRow, Clone, PartialEq, Eq, Debug, PartialOrd, Ord)]
@@ -150,7 +157,7 @@ impl<'r> FromRow<'r, MySqlRow> for Medal {
             (3, "champion") => Ok(Self::Champion),
             (id, _) => Err(sqlx::Error::ColumnDecode {
                 index: "id".to_owned(),
-                source: Box::new(RecordsErrorKind::UnknownMedal(id, medal_name)),
+                source: format!("unknown medal `{id}`, `{medal_name}`").into(),
             }),
         }
     }
@@ -185,7 +192,7 @@ impl<'r> FromRow<'r, MySqlRow> for RatingKind {
             (3, "difficulty") => Ok(Self::Difficulty),
             (id, _) => Err(sqlx::Error::ColumnDecode {
                 index: "id".to_owned(),
-                source: Box::new(RecordsErrorKind::UnknownRatingKind(id, kind)),
+                source: format!("unknown rating kind: `{id}`, `{kind}`").into(),
             }),
         }
     }
@@ -241,6 +248,7 @@ pub struct EventEdition {
     pub name: String,
     pub start_date: chrono::NaiveDateTime,
     pub banner_img_url: Option<String>,
+    pub mx_id: Option<i32>,
 }
 
 #[derive(Serialize, FromRow, Clone, Debug)]
@@ -256,6 +264,7 @@ pub struct EventEditionMaps {
     pub edition_id: u32,
     pub map_id: u32,
     pub category_id: Option<u32>,
+    pub mx_id: i64,
 }
 
 #[derive(Serialize, PartialEq, Eq, Clone, Copy, Debug)]
@@ -274,7 +283,7 @@ impl<'r> FromRow<'r, MySqlRow> for ApiStatusKind {
             (2, "maintenance") => Ok(Self::Maintenance),
             (id, _) => Err(sqlx::Error::ColumnDecode {
                 index: "status_id".to_owned(),
-                source: Box::new(RecordsErrorKind::UnknownStatus(id, kind)),
+                source: format!("unknown status `{id}`, `{kind}`").into(),
             }),
         }
     }

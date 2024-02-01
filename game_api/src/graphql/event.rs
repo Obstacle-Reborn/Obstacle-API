@@ -6,16 +6,54 @@ use async_graphql::{
 };
 use sqlx::{mysql, FromRow, MySqlPool};
 
-use crate::models::{Event, EventCategory, EventEdition, EventEditionMaps, Player};
+use records_lib::models::{self, EventCategory};
+
+use super::player::Player;
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Event {
+    #[sqlx(flatten)]
+    inner: models::Event,
+}
+
+impl From<models::Event> for Event {
+    fn from(inner: models::Event) -> Self {
+        Self { inner }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EventEdition {
+    #[sqlx(flatten)]
+    inner: models::EventEdition,
+}
+
+impl From<models::EventEdition> for EventEdition {
+    fn from(inner: models::EventEdition) -> Self {
+        Self { inner }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EventEditionMaps {
+    #[sqlx(flatten)]
+    inner: models::EventEditionMaps,
+}
+
+impl From<models::EventEditionMaps> for EventEditionMaps {
+    fn from(inner: models::EventEditionMaps) -> Self {
+        Self { inner }
+    }
+}
 
 #[async_graphql::Object]
 impl Event {
     async fn handle(&self) -> &str {
-        &self.handle
+        &self.inner.handle
     }
 
     async fn cooldown(&self) -> Option<u8> {
-        self.cooldown
+        self.inner.cooldown
     }
 
     async fn admins(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Player>> {
@@ -27,7 +65,7 @@ impl Event {
                 WHERE event_id = ?
             )",
         )
-        .bind(self.id)
+        .bind(self.inner.id)
         .fetch_all(db)
         .await?;
 
@@ -43,7 +81,7 @@ impl Event {
                 WHERE event_id = ?
             )",
         )
-        .bind(self.id)
+        .bind(self.inner.id)
         .fetch_all(db)
         .await?;
         Ok(q)
@@ -52,7 +90,7 @@ impl Event {
     async fn editions(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<EventEdition>> {
         let db = ctx.data_unchecked::<MySqlPool>();
         let q = sqlx::query_as("SELECT * FROM event_edition WHERE event_id = ?")
-            .bind(self.id)
+            .bind(self.inner.id)
             .fetch_all(db)
             .await?;
         Ok(q)
@@ -82,8 +120,8 @@ impl Loader<u32> for EventLoader {
         }
 
         Ok(q.map(|row: mysql::MySqlRow| {
-            let event = Event::from_row(&row).unwrap();
-            (event.id, event)
+            let event = models::Event::from_row(&row).unwrap();
+            (event.id, event.into())
         })
         .fetch_all(&self.0)
         .await?
@@ -128,26 +166,26 @@ impl Loader<u32> for EventCategoryLoader {
 #[async_graphql::Object]
 impl EventEdition {
     async fn id(&self) -> u32 {
-        self.id
+        self.inner.id
     }
 
     async fn event(&self, ctx: &Context<'_>) -> async_graphql::Result<Event> {
         ctx.data_unchecked::<DataLoader<EventLoader>>()
-            .load_one(self.event_id)
+            .load_one(self.inner.event_id)
             .await?
             .ok_or_else(|| async_graphql::Error::new("Event not found."))
     }
 
     async fn name(&self) -> &str {
-        &self.name
+        &self.inner.name
     }
 
     async fn start_date(&self) -> &chrono::NaiveDateTime {
-        &self.start_date
+        &self.inner.start_date
     }
 
     async fn banner_img_url(&self) -> Option<&str> {
-        self.banner_img_url.as_deref()
+        self.inner.banner_img_url.as_deref()
     }
 
     async fn categories(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<EventCategory>> {
@@ -159,8 +197,8 @@ impl EventEdition {
                 WHERE event_id = ? AND edition_id = ?
             )",
         )
-        .bind(self.event_id)
-        .bind(self.id)
+        .bind(self.inner.event_id)
+        .bind(self.inner.id)
         .fetch_all(db)
         .await?;
         Ok(q)
@@ -171,7 +209,7 @@ impl EventEdition {
 impl EventEditionMaps {
     async fn event(&self, ctx: &Context<'_>) -> async_graphql::Result<Event> {
         ctx.data_unchecked::<DataLoader<EventLoader>>()
-            .load_one(self.event_id)
+            .load_one(self.inner.event_id)
             .await?
             .ok_or_else(|| async_graphql::Error::new("Event not found."))
     }
@@ -179,15 +217,15 @@ impl EventEditionMaps {
     async fn edition(&self, ctx: &Context<'_>) -> async_graphql::Result<EventEdition> {
         let db = ctx.data_unchecked::<MySqlPool>();
         let q = sqlx::query_as("SELECT * FROM event_edition WHERE id = ? AND event_id = ?")
-            .bind(self.edition_id)
-            .bind(self.event_id)
+            .bind(self.inner.edition_id)
+            .bind(self.inner.event_id)
             .fetch_one(db)
             .await?;
         Ok(q)
     }
 
     async fn category(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<EventCategory>> {
-        let Some(category_id) = self.category_id else {
+        let Some(category_id) = self.inner.category_id else {
             return Ok(None);
         };
 

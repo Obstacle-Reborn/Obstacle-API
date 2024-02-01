@@ -1,50 +1,22 @@
 use async_graphql::SimpleObject;
 use deadpool_redis::{redis::AsyncCommands, Connection as RedisConnection};
-use futures::StreamExt;
+use records_lib::{
+    must, player,
+    redis_key::{
+        mappack_key, mappack_lb_key, mappack_map_last_rank, mappack_nb_map_key,
+        mappack_player_map_finished_key, mappack_player_rank_avg_key, mappack_player_ranks_key,
+        mappack_player_worst_rank_key, MappackKey,
+    },
+    update_mappacks::update_mappack,
+    Database, MySqlPool, RedisPool,
+};
 use reqwest::Client;
 use serde::Deserialize;
-use sqlx::{FromRow, MySqlConnection};
+use sqlx::MySqlConnection;
 
-use crate::{
-    get_env_var_as, models, must,
-    utils::{format_key, format_mappack_key, Escaped},
-    Database, RecordsErrorKind, RecordsResult,
-};
+use crate::{RecordsErrorKind, RecordsResult, RecordsResultExt};
 
-use super::{get_rank_or_full_update, utils::RecordAttr};
-
-#[derive(SimpleObject, Default, Clone, Debug)]
-pub struct Rank {
-    rank: i32,
-    map_idx: usize,
-}
-
-#[derive(SimpleObject, Debug)]
-pub struct PlayerScore {
-    player_id: u32,
-    login: String,
-    name: Escaped,
-    ranks: Vec<Rank>,
-    score: f64,
-    maps_finished: usize,
-    rank: u32,
-    worst: Rank,
-}
-
-#[derive(SimpleObject)]
-pub struct MappackMap {
-    map: Escaped,
-    map_id: String,
-    last_rank: i32,
-    #[graphql(skip)]
-    records: Option<Vec<RankedRecordRow>>,
-}
-
-#[derive(SimpleObject)]
-pub struct MappackScores {
-    maps: Vec<MappackMap>,
-    scores: Vec<PlayerScore>,
-}
+use super::{map::Map, player::Player};
 
 #[derive(Deserialize)]
 #[allow(non_snake_case)]
@@ -52,13 +24,13 @@ struct MXMappackResponseItem {
     TrackUID: String,
 }
 
-async fn load_campaign(
+async fn fill_mappack(
     client: &Client,
     db: &mut MySqlConnection,
     redis_conn: &mut RedisConnection,
-    mappack_key: &str,
+    mappack_key: &MappackKey<'_>,
     mappack_id: u32,
-) -> RecordsResult<Vec<models::Map>> {
+) -> RecordsResult<()> {
     let res: Vec<MXMappackResponseItem> = client
         .get(format!(
             "https://sm.mania.exchange/api/mappack/get_mappack_tracks/{mappack_id}"
@@ -69,212 +41,205 @@ async fn load_campaign(
         .json()
         .await?;
 
-    let mut c = Vec::with_capacity(res.len());
-
     for MXMappackResponseItem { TrackUID } in res {
-        let map = must::have_map(&mut *db, &TrackUID).await?;
-        c.push(map);
-        redis_conn.sadd(mappack_key, TrackUID).await?;
+        // We check that the map exists in our database
+        let _ = must::have_map(&mut *db, &TrackUID).await?;
+        redis_conn
+            .sadd(mappack_key, TrackUID)
+            .await
+            .with_api_err()?;
     }
 
-    Ok(c)
+    Ok(())
 }
 
-#[derive(FromRow)]
-struct RecordRow {
-    #[sqlx(flatten)]
-    record: RecordAttr,
-    player_id2: u32,
-    player_login: String,
-    #[sqlx(try_from = "String")]
-    player_name: Escaped,
+pub struct Mappack {
+    mappack_id: String,
 }
 
-struct RankedRecordRow {
+#[derive(SimpleObject)]
+struct MappackMap {
     rank: i32,
-    record: RecordRow,
+    last_rank: i32,
+    map: Map,
+}
+
+struct MappackPlayer<'a> {
+    mappack_id: &'a str,
+    inner: Player,
+}
+
+#[async_graphql::Object]
+impl MappackPlayer<'_> {
+    async fn rank(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<usize> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let rank = redis_conn
+            .zscore(mappack_lb_key(self.mappack_id), self.inner.inner.id)
+            .await?;
+        Ok(rank)
+    }
+
+    async fn player(&self) -> &Player {
+        &self.inner
+    }
+
+    async fn ranks(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Vec<MappackMap>> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let mysql_pool = ctx.data_unchecked::<MySqlPool>();
+
+        let redis_conn = &mut redis_pool.get().await?;
+        let mysql_conn = &mut mysql_pool.acquire().await?;
+
+        let maps_uids: Vec<String> = redis_conn
+            .zrange_withscores(
+                mappack_player_ranks_key(self.mappack_id, self.inner.inner.id),
+                0,
+                -1,
+            )
+            .await?;
+        let maps_uids = maps_uids.chunks_exact(2);
+
+        let mut out = Vec::with_capacity(maps_uids.size_hint().0);
+
+        for chunk in maps_uids {
+            let [game_id, rank] = chunk else {
+                unreachable!("plz stabilize Iterator::array_chunks")
+            };
+            let rank = rank.parse()?;
+            let last_rank = redis_conn
+                .get(mappack_map_last_rank(self.mappack_id, game_id))
+                .await?;
+            let map = must::have_map(&mut **mysql_conn, game_id).await?;
+
+            out.push(MappackMap {
+                map: map.into(),
+                rank,
+                last_rank,
+            });
+        }
+
+        Ok(out)
+    }
+
+    async fn rank_avg(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<f64> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let rank = redis_conn
+            .get(mappack_player_rank_avg_key(
+                self.mappack_id,
+                self.inner.inner.id,
+            ))
+            .await?;
+        Ok(rank)
+    }
+
+    async fn map_finished(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<usize> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let map_finished = redis_conn
+            .get(mappack_player_map_finished_key(
+                self.mappack_id,
+                self.inner.inner.id,
+            ))
+            .await?;
+        Ok(map_finished)
+    }
+
+    async fn worst_rank(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<i32> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let worst_rank = redis_conn
+            .get(mappack_player_worst_rank_key(
+                self.mappack_id,
+                self.inner.inner.id,
+            ))
+            .await?;
+        Ok(worst_rank)
+    }
+}
+
+#[async_graphql::Object]
+impl Mappack {
+    async fn nb_maps(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<usize> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let nb_map = redis_conn.get(mappack_nb_map_key(&self.mappack_id)).await?;
+        Ok(nb_map)
+    }
+
+    async fn leaderboard<'a>(
+        &'a self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Vec<MappackPlayer<'a>>> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let mysql_pool = ctx.data_unchecked::<MySqlPool>();
+
+        let redis_conn = &mut redis_pool.get().await?;
+        let mysql_conn = &mut mysql_pool.acquire().await?;
+
+        let leaderboard: Vec<u32> = redis_conn
+            .zrange(mappack_lb_key(&self.mappack_id), 0, -1)
+            .await?;
+
+        let mut out = Vec::with_capacity(leaderboard.len());
+
+        for id in leaderboard {
+            let player = player::get_player_from_id(&mut **mysql_conn, id).await?;
+            out.push(MappackPlayer {
+                inner: player.into(),
+                mappack_id: &self.mappack_id,
+            });
+        }
+
+        Ok(out)
+    }
+
+    async fn player<'a>(
+        &'a self,
+        ctx: &async_graphql::Context<'_>,
+        login: String,
+    ) -> async_graphql::Result<MappackPlayer<'a>> {
+        let mysql_pool = ctx.data_unchecked::<MySqlPool>();
+        let player = must::have_player(mysql_pool, &login).await?;
+
+        Ok(MappackPlayer {
+            inner: player.into(),
+            mappack_id: &self.mappack_id,
+        })
+    }
 }
 
 pub async fn calc_scores(
     ctx: &async_graphql::Context<'_>,
     mappack_id: String,
-) -> RecordsResult<MappackScores> {
+) -> RecordsResult<Mappack> {
     let db = ctx.data_unchecked::<Database>();
-    let mysql_conn = &mut db.mysql_pool.acquire().await?;
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err()?;
     let redis_conn = &mut db.redis_pool.get().await?;
-    let mappack_key = format_mappack_key(&mappack_id);
+    let mappack_key = mappack_key(&mappack_id);
 
-    let mappack_uids: Vec<String> = redis_conn.smembers(&mappack_key).await?;
+    let mappack_uids: Vec<String> = redis_conn.smembers(&mappack_key).await.with_api_err()?;
 
-    let mut maps = Vec::with_capacity(mappack_uids.len().max(5));
-
-    let mappack = if mappack_uids.is_empty() {
-        let Ok(mappack_id) = mappack_id.parse() else {
+    // We load the campaign, and update it, before retrieving the scores from it
+    if mappack_uids.is_empty() {
+        let Ok(mappack_id_int) = mappack_id.parse() else {
             return Err(RecordsErrorKind::InvalidMappackId(mappack_id));
         };
+
         let client = ctx.data_unchecked::<Client>();
-        let out = load_campaign(client, mysql_conn, redis_conn, &mappack_key, mappack_id).await?;
-        for map in &out {
-            maps.push(MappackMap {
-                map: map.name.clone().into(),
-                map_id: map.game_id.clone(),
-                last_rank: 0,
-                records: None,
-            });
-        }
-        out
-    } else {
-        let mut out = Vec::with_capacity(mappack_uids.len());
-        for map_uid in &mappack_uids {
-            let map = must::have_map(&mut **mysql_conn, map_uid).await?;
-            maps.push(MappackMap {
-                map: map.name.clone().into(),
-                map_id: map.game_id.clone(),
-                last_rank: 0,
-                records: None,
-            });
-            out.push(map);
-        }
-        out
-    };
 
-    let no_ttl: Vec<String> = redis_conn
-        .smembers(format_key("no_ttl_mappacks".to_owned()))
-        .await?;
-    if !no_ttl.contains(&mappack_id) {
-        // Update the expiration time of the redis key
-        let mappack_ttl = get_env_var_as("RECORDS_API_MAPPACK_TTL");
-        redis_conn.expire(mappack_key, mappack_ttl).await?;
+        // We fill the mappack
+        fill_mappack(client, mysql_conn, redis_conn, &mappack_key, mappack_id_int).await?;
+
+        // And we update it to have its scores cached
+        update_mappack(&mappack_id, mysql_conn, redis_conn)
+            .await
+            .with_api_err()?;
     }
 
-    let mut scores = Vec::<PlayerScore>::with_capacity(mappack.len());
-
-    for (i, map) in mappack.iter().enumerate() {
-        let mut res = sqlx::query_as::<_, RecordRow>(
-            "SELECT r.*, p.id as player_id2, p.login as player_login, p.name as player_name
-            FROM global_records r
-            INNER JOIN players p ON p.id = r.record_player_id
-            WHERE map_id = ?
-            ORDER BY time ASC",
-        )
-        .bind(map.id)
-        .fetch(&mut **mysql_conn);
-
-        let mysql_conn = &mut db.mysql_pool.acquire().await?;
-
-        let mut records = Vec::with_capacity(res.size_hint().0);
-
-        while let Some(record) = res.next().await {
-            let record = record?;
-
-            if !scores.iter().any(|p| p.player_id == record.player_id2) {
-                scores.push(PlayerScore {
-                    player_id: record.player_id2,
-                    login: record.player_login.clone(),
-                    name: record.player_name.clone(),
-                    ranks: Vec::new(),
-                    score: 0.,
-                    maps_finished: 0,
-                    rank: 0,
-                    worst: Default::default(),
-                });
-            }
-
-            let record = RankedRecordRow {
-                rank: get_rank_or_full_update(
-                    (&mut *mysql_conn, redis_conn),
-                    map,
-                    record.record.record.time,
-                    None,
-                )
-                .await?,
-                record,
-            };
-            records.push(record);
-        }
-
-        maps[i].records = Some(records);
-    }
-
-    let mut map_number = 1;
-
-    for (map_idx, map) in maps.iter_mut().enumerate() {
-        let records = map.records.take().unwrap();
-
-        let last_rank = records.iter().map(|p| p.rank).max().unwrap_or(99);
-
-        for record in records {
-            let player = scores
-                .iter_mut()
-                .find(|p| p.player_id == record.record.player_id2)
-                .unwrap();
-
-            player.ranks.push(Rank {
-                rank: record.rank,
-                map_idx,
-            });
-            map.last_rank = last_rank;
-
-            player.maps_finished += 1;
-        }
-
-        for player in &mut scores {
-            if player.ranks.len() < map_number {
-                player.ranks.push(Rank {
-                    rank: last_rank + 1,
-                    map_idx,
-                });
-                map.last_rank = last_rank;
-            }
-        }
-
-        map_number += 1;
-    }
-
-    for player in &mut scores {
-        player.ranks.sort_by(|a, b| {
-            ((a.rank / maps[a.map_idx].last_rank - b.rank / maps[b.map_idx].last_rank)
-                + (a.rank - b.rank) / 1000)
-                .cmp(&0)
-        });
-
-        player.worst = player
-            .ranks
-            .iter()
-            .reduce(|a, b| if a.rank > b.rank { a } else { b })
-            .unwrap()
-            .clone();
-
-        player.score = player
-            .ranks
-            .iter()
-            .fold(0., |acc, rank| acc + rank.rank as f64)
-            / player.ranks.len() as f64;
-    }
-
-    scores.sort_by(|a, b| {
-        if a.maps_finished != b.maps_finished {
-            b.maps_finished.cmp(&a.maps_finished)
-        } else {
-            a.score.partial_cmp(&b.score).unwrap()
-        }
-    });
-
-    let mut old_score = 0.;
-    let mut old_finishes = 0;
-    let mut old_rank = 0;
-
-    for (rank, player) in scores.iter_mut().enumerate() {
-        player.rank = if old_score.eq(&player.score) && old_finishes == player.maps_finished {
-            old_rank
-        } else {
-            rank as u32 + 1
-        };
-
-        old_score = player.score;
-        old_finishes = player.maps_finished;
-        old_rank = player.rank;
-    }
-
-    Ok(MappackScores { maps, scores })
+    Ok(Mappack { mappack_id })
 }

@@ -6,49 +6,64 @@ use async_graphql::{
 };
 use deadpool_redis::redis::AsyncCommands;
 use futures::StreamExt;
+use records_lib::{
+    escaped::Escaped, models::{self, Record}, redis_key::alone_map_key, update_ranks::{get_rank_or_full_update, update_leaderboard}, Database
+};
 use sqlx::{mysql, FromRow, MySqlPool};
 
-use crate::{
-    auth::{self, privilege, WebToken},
-    models::{Map, MedalPrice, Player, PlayerRating, RankedRecord, Rating, Record},
-    redis,
-    utils::{format_map_key, Escaped},
-    Database,
+use crate::auth::{self, privilege, WebToken};
+
+use super::{
+    medal::MedalPrice,
+    player::{Player, PlayerLoader},
+    rating::{PlayerRating, Rating},
+    record::RankedRecord,
+    SortState,
 };
 
-use super::{player::PlayerLoader, utils::get_rank_or_full_update, SortState};
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Map {
+    #[sqlx(flatten)]
+    inner: models::Map,
+}
+
+impl From<models::Map> for Map {
+    fn from(inner: models::Map) -> Self {
+        Self { inner }
+    }
+}
 
 #[async_graphql::Object]
 impl Map {
     pub async fn id(&self) -> ID {
-        ID(format!("v0:Map:{}", self.id))
+        ID(format!("v0:Map:{}", self.inner.id))
     }
 
-    async fn game_id(&self) -> &str {
-        &self.game_id
+    async fn game_id(&self) -> Escaped {
+        self.inner.game_id.clone().into()
     }
 
     async fn player_id(&self) -> ID {
-        ID(format!("v0:Player:{}", self.player_id))
+        ID(format!("v0:Player:{}", self.inner.player_id))
     }
 
     async fn cps_number(&self) -> Option<u32> {
-        self.cps_number
+        self.inner.cps_number
     }
 
     async fn player(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<Player> {
         ctx.data_unchecked::<DataLoader<PlayerLoader>>()
-            .load_one(self.player_id)
+            .load_one(self.inner.player_id)
             .await?
             .ok_or_else(|| async_graphql::Error::new("Player not found."))
     }
 
     async fn name(&self) -> Escaped {
-        self.name.clone().into()
+        self.inner.name.clone().into()
     }
 
     async fn reversed(&self) -> bool {
-        self.reversed.unwrap_or(false)
+        self.inner.reversed.unwrap_or(false)
     }
 
     async fn medal_for(
@@ -78,7 +93,7 @@ impl Map {
         Ok(sqlx::query_as(
             "SELECT * FROM prizes WHERE map_id = ? AND player_id = ? ORDER BY medal DESC",
         )
-        .bind(self.id)
+        .bind(self.inner.id)
         .bind(player_id)
         .fetch_optional(&db.mysql_pool)
         .await?)
@@ -94,7 +109,7 @@ impl Map {
         };
 
         let author_login: String = sqlx::query_scalar("SELECT login FROM player WHERE id = ?")
-            .bind(self.player_id)
+            .bind(self.inner.player_id)
             .fetch_one(&db.mysql_pool)
             .await?;
 
@@ -107,7 +122,7 @@ impl Map {
         auth::website_check_auth_for(db, login, token, role).await?;
 
         Ok(sqlx::query_as("SELECT * FROM rating WHERE map_id = ?")
-            .bind(self.id)
+            .bind(self.inner.id)
             .fetch_all(&db.mysql_pool)
             .await?)
     }
@@ -122,7 +137,7 @@ impl Map {
             AVG(rating) AS "rating" FROM player_rating
             WHERE map_id = ? GROUP BY kind ORDER BY kind"#,
         )
-        .bind(self.id)
+        .bind(self.inner.id)
         .fetch_all(db)
         .await?;
         Ok(fetch_all)
@@ -138,10 +153,10 @@ impl Map {
         let mysql_conn = &mut db.mysql_pool.acquire().await?;
         let redis_conn = &mut db.redis_pool.get().await?;
 
-        let key = format_map_key(self.id, None);
-        let reversed = self.reversed.unwrap_or(false);
+        let key = alone_map_key(self.inner.id);
+        let reversed = self.inner.reversed.unwrap_or(false);
 
-        redis::update_leaderboard((mysql_conn, redis_conn), self, None).await?;
+        update_leaderboard((mysql_conn, redis_conn), &self.inner, None).await?;
 
         let to_reverse = reversed
             ^ rank_sort_by
@@ -190,7 +205,7 @@ impl Map {
             }
         );
 
-        let mut query = sqlx::query_as::<_, Record>(&query).bind(self.id);
+        let mut query = sqlx::query_as::<_, Record>(&query).bind(self.inner.id);
         if date_sort_by.is_none() {
             for id in &record_ids {
                 query = query.bind(id);
@@ -204,11 +219,15 @@ impl Map {
 
         while let Some(record) = records.next().await {
             let record = record?;
-            let rank =
-                get_rank_or_full_update((&mut *mysql_conn, redis_conn), self, record.time, None)
-                    .await?;
+            let rank = get_rank_or_full_update(
+                (&mut *mysql_conn, redis_conn),
+                &self.inner,
+                record.time,
+                None,
+            )
+            .await?;
 
-            ranked_records.push(RankedRecord { rank, record });
+            ranked_records.push(models::RankedRecord { rank, record }.into());
         }
 
         Ok(ranked_records)
@@ -240,7 +259,7 @@ impl Loader<u32> for MapLoader {
         Ok(query
             .map(|row: mysql::MySqlRow| {
                 let map = Map::from_row(&row).unwrap();
-                (map.id, map)
+                (map.inner.id, map)
             })
             .fetch_all(&self.0)
             .await?

@@ -4,11 +4,12 @@
 use actix_web::web::JsonConfig;
 use actix_web::{web, Scope};
 
+use records_lib::Database;
 use serde::Serialize;
 use tracing_actix_web::RequestId;
 
 use crate::utils::{get_api_status, json, ApiStatus};
-use crate::{Database, FitRequestId, RecordsResponse};
+use crate::{FitRequestId, RecordsResponse};
 use actix_web::{web::Data, Responder};
 
 use self::admin::admin_scope;

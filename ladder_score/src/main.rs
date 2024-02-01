@@ -1,6 +1,6 @@
 use futures::StreamExt;
-use game_api::{get_mysql_pool, models::*};
-use sqlx::mysql;
+use game_api::{get_mysql_pool, models_old::*};
+use sqlx::{mysql, MySqlConnection};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -32,17 +32,14 @@ fn compute_score(r: f64, rn: f64, t: f64, average_record: f64) -> f64 {
 }
 
 async fn compute_map_score(
-    mysql_pool: &mysql::MySqlPool,
-    map_stats: &HashMap<u32, MapStats>,
-    map_id: u32,
-) -> f64 {
-    let stats = &map_stats[&map_id];
+    mysql_conn: &mut MySqlConnection,
+    (map_id, stats): (&u32, &MapStats),
+) -> anyhow::Result<f64> {
     let map_records =
         sqlx::query_as::<_, Record>("SELECT * from records WHERE map_id = ? ORDER BY time")
             .bind(map_id)
-            .fetch_all(mysql_pool)
-            .await
-            .unwrap();
+            .fetch_all(mysql_conn)
+            .await?;
     let to_sec = |time: i32| (time as f64) / 1000.0;
 
     let r = 1.0;
@@ -50,14 +47,17 @@ async fn compute_map_score(
     let t = to_sec(map_records[0].time);
     let t = t.max(stats.average_record);
 
-    compute_score(r, rn, t, stats.average_record)
+    Ok(compute_score(r, rn, t, stats.average_record))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mysql_pool = get_mysql_pool().await?;
+    dotenvy::dotenv()?;
 
-    let mut maps_q = sqlx::query_as::<_, Map>("SELECT * FROM maps").fetch(&mysql_pool);
+    let mysql_pool = get_mysql_pool().await?;
+    let mysql_conn = &mut mysql_pool.acquire().await?;
+
+    let mut maps_q = sqlx::query_as::<_, Map>("SELECT * FROM maps").fetch(&mut **mysql_conn);
     let mut maps = HashMap::with_capacity(maps_q.size_hint().0);
 
     while let Some(map) = maps_q.next().await {
@@ -65,7 +65,8 @@ async fn main() -> anyhow::Result<()> {
         maps.insert(map.id, map);
     }
 
-    let mut players_q = sqlx::query_as::<_, Player>("SELECT * FROM players").fetch(&mysql_pool);
+    let mut players_q =
+        sqlx::query_as::<_, Player>("SELECT * FROM players").fetch(&mut **mysql_conn);
 
     let mut players = HashMap::with_capacity(players_q.size_hint().0);
 
@@ -82,16 +83,9 @@ async fn main() -> anyhow::Result<()> {
 
     for (_, map) in &maps {
         let map_records = sqlx::query_as::<_, Record>(&format!(
-            "SELECT r.*
-            FROM records r
-            INNER JOIN (
-                SELECT MAX(record_date) AS record_date, player_id
-                FROM records
-                WHERE map_id = ?
-                GROUP BY player_id
-            ) t ON t.record_date = r.record_date AND t.player_id = r.player_id
+            "SELECT * FROM global_records r
             WHERE map_id = ? 
-            ORDER BY r.time {order}, r.record_date ASC",
+            ORDER BY time {order}, record_date ASC",
             order = if map.reversed.unwrap_or(false) {
                 "DESC"
             } else {
@@ -100,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
         ))
         .bind(map.id)
         .bind(map.id)
-        .fetch_all(&mysql_pool)
+        .fetch_all(&mut **mysql_conn)
         .await?;
 
         // Skip maps without records
@@ -133,20 +127,27 @@ async fn main() -> anyhow::Result<()> {
             let record_score = compute_score(r, rn, t, stats.average_record);
 
             *map_scores.entry(record.map_id).or_insert(0.0) += record_score;
-            *player_scores.entry(record.player_id).or_insert(0.0) += record_score;
+            *player_scores.entry(record.record_player_id).or_insert(0.0) += record_score;
         }
 
         map_stats.insert(map.id, stats);
     }
 
-    let id = 16284;
-    let map = &maps[&id];
+    let (map, stats, score) = {
+        let (entry, score) = (None, None);
+        for a @ (map_id, map_stats) in map_stats.iter() {
+            let s = compute_map_score(&mut **mysql_conn, a).await?;
+            if (entry.is_none() && score.is_none()) || s > score.unwrap() {
+                entry = Some(a);
+                score = Some(s);
+            }
+        }
+        let entry = entry.unwrap();
+        (&maps[entry.0], entry.1, score.unwrap())
+    };
     println!(
         "r1 for map #{} \"{}\": {} pts of {} total.",
-        map.id,
-        map.name,
-        compute_map_score(&mysql_pool, &map_stats, map.id).await,
-        &map_scores[&id]
+        map.id, map.name, score, stats
     );
 
     let id = 38179;
@@ -155,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
         "r1 for map #{} \"{}\": {} pts of {} total.",
         map.id,
         map.name,
-        compute_map_score(&mysql_pool, &map_stats, map.id).await,
+        compute_map_score(mysql_conn, &map_stats, map.id).await,
         &map_scores[&id]
     );
 

@@ -2,15 +2,15 @@ use actix_web::{
     web::{self, Data, Json, Query},
     HttpResponse, Responder, Scope,
 };
+use records_lib::Database;
 use serde::{Deserialize, Serialize};
 use sqlx::{mysql::MySqlRow, FromRow, Row};
 use tracing_actix_web::RequestId;
 
 use crate::{
     auth::{privilege, MPAuthGuard},
-    must,
     utils::json,
-    Database, FitRequestId, RecordsErrorKind, RecordsResponse, RecordsResult,
+    FitRequestId, RecordsErrorKind, RecordsResponse, RecordsResult, RecordsResultExt,
 };
 
 pub fn admin_scope() -> Scope {
@@ -38,6 +38,7 @@ pub async fn del_note(
         .bind(&body.player_login)
         .execute(&db.mysql_pool)
         .await
+        .with_api_err()
         .fit(req_id)?;
 
     Ok(HttpResponse::Ok().finish())
@@ -66,12 +67,14 @@ pub async fn set_role(
         .bind(&body.player_login)
         .execute(&db.mysql_pool)
         .await
+        .with_api_err()
         .fit(req_id)?;
 
     let role = sqlx::query_scalar("SELECT role_name FROM role WHERE id = ?")
         .bind(body.role)
         .fetch_one(&db.mysql_pool)
         .await
+        .with_api_err()
         .fit(req_id)?;
 
     json(SetRoleResponse {
@@ -130,7 +133,7 @@ pub async fn banishments(
     db: Data<Database>,
     Query(body): Query<BanishmentsBody>,
 ) -> RecordsResponse<impl Responder> {
-    let player_id = must::have_player(&db, &body.player_login)
+    let player_id = records_lib::must::have_player(&db.mysql_pool, &body.player_login)
         .await
         .fit(req_id)?
         .id;
@@ -148,6 +151,7 @@ pub async fn banishments(
     .bind(player_id)
     .fetch_all(&db.mysql_pool)
     .await
+    .with_api_err()
     .fit(req_id)?;
 
     json(BanishmentsResponse {
@@ -175,17 +179,21 @@ pub async fn ban(
     db: Data<Database>,
     Json(body): Json<BanBody>,
 ) -> RecordsResponse<impl Responder> {
-    let player_id = must::have_player(&db, &body.player_login)
+    let player_id = records_lib::must::have_player(&db.mysql_pool, &body.player_login)
         .await
         .fit(req_id)?
         .id;
-    let admin_id = must::have_player(&db, &login).await.fit(req_id)?.id;
+    let admin_id = records_lib::must::have_player(&db.mysql_pool, &login)
+        .await
+        .fit(req_id)?
+        .id;
 
     let was_reprieved =
         sqlx::query_as::<_, Banishment>("SELECT * FROM banishments WHERE player_id = ?")
             .bind(&body.player_login)
             .fetch_optional(&db.mysql_pool)
             .await
+            .with_api_err()
             .fit(req_id)?
             .is_some();
 
@@ -202,6 +210,7 @@ pub async fn ban(
     .bind(admin_id)
     .fetch_one(&db.mysql_pool)
     .await
+    .with_api_err()
     .fit(req_id)?;
 
     let ban = sqlx::query_as(
@@ -210,7 +219,7 @@ pub async fn ban(
     )
     .bind(ban_id)
     .fetch_one(&db.mysql_pool)
-    .await.fit(req_id)?;
+    .await.with_api_err().fit(req_id)?;
 
     json(BanResponse {
         player_login: body.player_login,
@@ -227,7 +236,8 @@ pub async fn is_banned(db: &Database, player_id: u32) -> RecordsResult<Option<Ba
     )
     .bind(player_id)
     .fetch_optional(&db.mysql_pool)
-    .await?;
+    .await
+    .with_api_err()?;
 
     Ok(ban)
 }
@@ -249,7 +259,7 @@ pub async fn unban(
     db: Data<Database>,
     Json(body): Json<UnbanBody>,
 ) -> RecordsResponse<impl Responder> {
-    let player_id = must::have_player(&db, &body.player_login)
+    let player_id = records_lib::must::have_player(&db.mysql_pool, &body.player_login)
         .await
         .fit(req_id)?
         .id;
@@ -263,6 +273,7 @@ pub async fn unban(
             .bind(ban.inner.id)
             .fetch_optional(&db.mysql_pool)
             .await
+            .with_api_err()
             .fit(req_id)?
     {
         println!("duration: {duration}s");
@@ -272,6 +283,7 @@ pub async fn unban(
         .bind(ban.inner.id)
         .execute(&db.mysql_pool)
         .await
+        .with_api_err()
         .fit(req_id)?;
 
     json(UnbanResponse {
@@ -297,7 +309,7 @@ pub async fn player_note(
     db: Data<Database>,
     Json(body): Json<PlayerNoteBody>,
 ) -> RecordsResponse<impl Responder> {
-    let admins_note = must::have_player(&db, &body.player_login)
+    let admins_note = records_lib::must::have_player(&db.mysql_pool, &body.player_login)
         .await
         .fit(req_id)?
         .admins_note;

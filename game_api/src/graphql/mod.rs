@@ -7,6 +7,9 @@ use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
 use async_graphql::{connection, Enum, ErrorExtensionValues, Value, ID};
 use async_graphql_actix_web::GraphQLRequest;
 use futures::StreamExt;
+use records_lib::models::{self, RecordAttr};
+use records_lib::update_ranks::get_rank_or_full_update;
+use records_lib::Database;
 use reqwest::Client;
 use sqlx::{mysql, query_as, FromRow, MySqlPool, Row};
 use std::env::var;
@@ -16,14 +19,16 @@ use tracing_actix_web::RequestId;
 use crate::auth::{self, privilege, WebToken, WEB_TOKEN_SESS_KEY};
 use crate::graphql::map::MapLoader;
 use crate::graphql::player::PlayerLoader;
-use crate::models::{Banishment, Event, Map, Player, RankedRecord, Record};
-use crate::Database;
 
-use self::event::{EventCategoryLoader, EventLoader};
-use self::mappack::MappackScores;
+use self::ban::Banishment;
+use self::event::{Event, EventCategoryLoader, EventLoader};
+use self::map::Map;
+use self::mappack::Mappack;
+use self::player::Player;
+use self::record::RankedRecord;
 use self::utils::{
     connections_append_query_string, connections_bind_query_parameters, connections_pages_info,
-    decode_id, RecordAttr,
+    decode_id,
 };
 
 mod ban;
@@ -35,8 +40,6 @@ mod player;
 mod rating;
 mod record;
 mod utils;
-
-pub use self::utils::get_rank_or_full_update;
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Enum)]
 pub(crate) enum SortState {
@@ -68,7 +71,7 @@ impl QueryRoot {
         &self,
         ctx: &async_graphql::Context<'_>,
         mappack_id: String,
-    ) -> async_graphql::Result<MappackScores> {
+    ) -> async_graphql::Result<Mappack> {
         let res = mappack::calc_scores(ctx, mappack_id).await?;
         Ok(res)
     }
@@ -244,7 +247,7 @@ impl QueryRoot {
         let Some(row) = sqlx::query(
             "SELECT r.*, m.* FROM records r
             INNER JOIN maps m ON m.id = r.map_id
-            WHERE r.id = ?",
+            WHERE r.record_id = ?",
         )
         .bind(record_id)
         .fetch_optional(&db.mysql_pool)
@@ -253,16 +256,20 @@ impl QueryRoot {
             return Err(async_graphql::Error::new("Record not found."));
         };
 
-        let (record, map) = (Record::from_row(&row)?, Map::from_row(&row)?);
+        let (record, map) = (
+            models::Record::from_row(&row)?,
+            models::Map::from_row(&row)?,
+        );
 
         let redis_conn = &mut db.redis_pool.get().await?;
         let mysql_conn = &mut db.mysql_pool.acquire().await?;
 
-        Ok(RankedRecord {
+        Ok(models::RankedRecord {
             rank: get_rank_or_full_update((mysql_conn, redis_conn), &map, record.time, None)
                 .await?,
             record,
-        })
+        }
+        .into())
     }
 
     async fn map(
@@ -271,9 +278,10 @@ impl QueryRoot {
         game_id: String,
     ) -> async_graphql::Result<Map> {
         let db = ctx.data_unchecked::<Database>();
-        crate::http::player::get_map_from_game_id(&db.mysql_pool, &game_id)
+        records_lib::map::get_map_from_game_id(&db.mysql_pool, &game_id)
             .await?
             .ok_or_else(|| async_graphql::Error::new("Map not found."))
+            .map(Into::into)
     }
 
     async fn player(
@@ -316,7 +324,7 @@ impl QueryRoot {
             let rank =
                 get_rank_or_full_update((mysql_conn, redis_conn), &map, record.time, None).await?;
 
-            ranked_records.push(RankedRecord { rank, record });
+            ranked_records.push(models::RankedRecord { rank, record }.into());
         }
 
         Ok(ranked_records)

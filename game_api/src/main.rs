@@ -10,12 +10,13 @@ use actix_web::{
     App, HttpServer, Responder,
 };
 use anyhow::Context;
-use deadpool::Runtime;
+#[cfg(not(feature = "localhost_test"))]
+use records_lib::get_env_var;
 use game_api::{
-    api_route, get_mysql_pool, get_tokens_ttl, graphql_route, read_env_var_file, AuthState,
-    Database, FitRequestId, RecordsErrorKind, RecordsResponse,
+    api_route, get_tokens_ttl, graphql_route, AuthState, FitRequestId, RecordsErrorKind,
+    RecordsResponse,
 };
-use game_api::{get_env_var, get_env_var_as};
+use records_lib::{get_env_var_as, get_mysql_pool, get_redis_pool, read_env_var_file, Database};
 use reqwest::Client;
 use std::env::var;
 use tracing_actix_web::{RequestId, TracingLogger};
@@ -35,15 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let port = get_env_var_as("RECORDS_API_PORT");
 
     let mysql_pool = get_mysql_pool().await.context("Cannot create MySQL pool")?;
-
-    let redis_pool = {
-        let cfg = deadpool_redis::Config {
-            url: Some(get_env_var("REDIS_URL")),
-            connection: None,
-            pool: None,
-        };
-        cfg.create_pool(Some(Runtime::Tokio1)).unwrap()
-    };
+    let redis_pool = get_redis_pool().context("Cannot create Redis pool")?;
 
     let db = Database {
         mysql_pool,

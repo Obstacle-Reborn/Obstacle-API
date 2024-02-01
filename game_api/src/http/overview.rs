@@ -4,17 +4,17 @@ use actix_web::{
 };
 use deadpool_redis::{redis::AsyncCommands, Connection as RedisConnection};
 use futures::StreamExt;
+use records_lib::{
+    models::{self, Map},
+    redis_key::map_key,
+    update_ranks::{get_rank_or_full_update, update_leaderboard},
+    Database, GetSqlFragments,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::MySqlConnection;
 use tracing_actix_web::RequestId;
 
-use crate::{
-    graphql::get_rank_or_full_update,
-    models::{self, Map},
-    must, redis,
-    utils::{format_map_key, json},
-    Database, FitRequestId, GetSqlFragments, RecordsResponse, RecordsResult,
-};
+use crate::{utils::json, FitRequestId, RecordsResponse, RecordsResult, RecordsResultExt};
 
 #[derive(Deserialize)]
 pub struct OverviewQuery {
@@ -56,7 +56,7 @@ async fn get_range(
     event: Option<&(models::Event, models::EventEdition)>,
 ) -> RecordsResult<Vec<RankedRecord>> {
     let reversed = reversed.unwrap_or(false);
-    let key = format_map_key(*map_id, event);
+    let key = map_key(*map_id, event);
 
     let (join_event, and_event) = event.get_sql_fragments();
 
@@ -67,7 +67,8 @@ async fn get_range(
     } else {
         redis_conn.zrange(key, start as isize, end as isize)
     }
-    .await?;
+    .await
+    .with_api_err()?;
 
     if ids.is_empty() {
         // Avoids the query building to have a `AND record_player_id IN ()` fragment
@@ -113,7 +114,7 @@ async fn get_range(
     let mut records = query.fetch(&mut *mysql_conn);
     let mut out = Vec::with_capacity(records.size_hint().0);
 
-    let mysql_conn = &mut db.mysql_pool.acquire().await?;
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err()?;
 
     while let Some(record) = records.next().await {
         let RecordQueryRow {
@@ -121,7 +122,7 @@ async fn get_range(
             nickname,
             time,
             map,
-        } = record?;
+        } = record.with_api_err()?;
 
         out.push(RankedRecord {
             rank: get_rank_or_full_update((mysql_conn, redis_conn), &map, time, event).await? as _,
@@ -140,7 +141,7 @@ pub async fn overview(
     Query(body): Query<OverviewQuery>,
     event: Option<(String, u32)>,
 ) -> RecordsResponse<impl Responder> {
-    let mysql_conn = &mut db.mysql_pool.acquire().await.fit(req_id)?;
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
     let redis_conn = &mut db.redis_pool.get().await.fit(req_id)?;
 
     let ref map @ Map {
@@ -148,25 +149,33 @@ pub async fn overview(
         linked_map,
         reversed,
         ..
-    } = must::have_map(&mut **mysql_conn, &body.map_uid)
+    } = records_lib::must::have_map(&mut **mysql_conn, &body.map_uid)
         .await
         .fit(req_id)?;
-    let player_id = must::have_player(&db, &body.login).await.fit(req_id)?.id;
+    let player_id = records_lib::must::have_player(&mut **mysql_conn, &body.login)
+        .await
+        .fit(req_id)?
+        .id;
     let map_id = linked_map.unwrap_or(id);
     let reversed = reversed.unwrap_or(false);
 
     let event = match event {
         Some((event_handle, edition_id)) => Some(
-            must::have_event_edition_with_map(&db, &body.map_uid, event_handle, edition_id)
-                .await
-                .fit(req_id)?,
+            records_lib::must::have_event_edition_with_map(
+                &db,
+                &body.map_uid,
+                event_handle,
+                edition_id,
+            )
+            .await
+            .fit(req_id)?,
         ),
         None => None,
     };
 
     // Update redis if needed
-    let key = format_map_key(map_id, event.as_ref());
-    let count = redis::update_leaderboard((mysql_conn, redis_conn), map, event.as_ref())
+    let key = map_key(map_id, event.as_ref());
+    let count = update_leaderboard((mysql_conn, redis_conn), map, event.as_ref())
         .await
         .fit(req_id)? as u32;
 
@@ -182,6 +191,7 @@ pub async fn overview(
         redis_conn.zrank(&key, player_id)
     }
     .await
+    .with_api_err()
     .fit(req_id)?;
     let player_rank = player_rank.map(|r| r as u64 as u32);
 

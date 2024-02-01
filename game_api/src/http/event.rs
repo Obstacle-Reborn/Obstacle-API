@@ -3,15 +3,15 @@ use actix_web::{
     Responder, Scope,
 };
 use itertools::Itertools;
+use records_lib::{models, Database};
 use serde::Serialize;
 use sqlx::FromRow;
 use tracing_actix_web::RequestId;
 
 use crate::{
     auth::{privilege, MPAuthGuard},
-    models, must,
     utils::json,
-    Database, FitRequestId, RecordsResponse, RecordsResult,
+    FitRequestId, RecordsResponse, RecordsResult, RecordsResultExt,
 };
 
 use super::{overview, pb, player::UpdatePlayerBody, player_finished as pf};
@@ -35,37 +35,6 @@ pub fn event_scope() -> Scope {
         .default_service(web::get().to(event_list))
 }
 
-pub fn get_sql_fragments() -> (&'static str, &'static str) {
-    (
-        "INNER JOIN event_edition_records eer ON r.record_id = eer.record_id",
-        "AND eer.event_id = ? AND eer.edition_id = ?",
-    )
-}
-
-pub async fn get_event_by_handle(
-    db: &Database,
-    handle: &str,
-) -> RecordsResult<Option<models::Event>> {
-    let r = sqlx::query_as("SELECT * FROM event WHERE handle = ?")
-        .bind(handle)
-        .fetch_optional(&db.mysql_pool)
-        .await?;
-    Ok(r)
-}
-
-pub async fn get_edition_by_id(
-    db: &Database,
-    event_id: u32,
-    edition_id: u32,
-) -> RecordsResult<Option<models::EventEdition>> {
-    let r = sqlx::query_as("SELECT * FROM event_edition WHERE event_id = ? AND id = ?")
-        .bind(event_id)
-        .bind(edition_id)
-        .fetch_optional(&db.mysql_pool)
-        .await?;
-    Ok(r)
-}
-
 pub async fn get_categories_by_edition_id(
     db: &Database,
     event_id: u32,
@@ -82,7 +51,8 @@ pub async fn get_categories_by_edition_id(
     .bind(event_id)
     .bind(edition_id)
     .fetch_all(&db.mysql_pool)
-    .await?;
+    .await
+    .with_api_err()?;
 
     Ok(r)
 }
@@ -92,6 +62,7 @@ struct MapWithCategory {
     #[sqlx(flatten)]
     map: models::Map,
     category_id: Option<u32>,
+    mx_id: i64,
 }
 
 async fn get_maps_by_edition_id(
@@ -100,15 +71,17 @@ async fn get_maps_by_edition_id(
     edition_id: u32,
 ) -> RecordsResult<Vec<MapWithCategory>> {
     let r = sqlx::query_as(
-        "SELECT m.*, category_id FROM maps m
-        INNER JOIN event_edition_maps ON id = map_id
+        "SELECT m.*, category_id, mx_id
+        FROM maps m
+        INNER JOIN event_edition_maps eem ON id = map_id
         AND event_id = ? AND edition_id = ?
-        ORDER BY category_id",
+        ORDER BY category_id, eem.order",
     )
     .bind(event_id)
     .bind(edition_id)
     .fetch_all(&db.mysql_pool)
-    .await?;
+    .await
+    .with_api_err()?;
 
     Ok(r)
 }
@@ -122,11 +95,13 @@ pub struct EventResponse {
 #[derive(Serialize, FromRow)]
 struct EventHandleResponse {
     id: u32,
+    name: String,
     start_date: chrono::NaiveDateTime,
 }
 
 #[derive(Serialize)]
 struct Map {
+    mx_id: i64,
     main_author: UpdatePlayerBody,
     name: String,
     map_uid: String,
@@ -134,6 +109,7 @@ struct Map {
     silver_time: i32,
     gold_time: i32,
     champion_time: i32,
+    personal_best: i32,
 }
 
 #[derive(Serialize, Default)]
@@ -159,6 +135,7 @@ struct EventHandleEditionResponse {
     name: String,
     start_date: chrono::NaiveDateTime,
     banner_img_url: String,
+    mx_id: i32,
     categories: Vec<Category>,
 }
 
@@ -174,6 +151,7 @@ async fn event_list(req_id: RequestId, db: Data<Database>) -> RecordsResponse<im
     )
     .fetch_all(&db.mysql_pool)
     .await
+    .with_api_err()
     .fit(req_id)?;
 
     json(out)
@@ -185,7 +163,7 @@ async fn event_editions(
     event_handle: Path<String>,
 ) -> RecordsResponse<impl Responder> {
     let event_handle = event_handle.into_inner();
-    let id = must::have_event_handle(&db, &event_handle)
+    let id = records_lib::must::have_event_handle(&db, &event_handle)
         .await
         .fit(req_id)?
         .id;
@@ -195,19 +173,30 @@ async fn event_editions(
             .bind(id)
             .fetch_all(&db.mysql_pool)
             .await
+            .with_api_err()
             .fit(req_id)?;
 
     json(res)
 }
 
+#[derive(FromRow)]
+struct AuthorWithPlayerTime {
+    /// The author of the map
+    #[sqlx(flatten)]
+    main_author: UpdatePlayerBody,
+    // The time of the player (not the same player as the author)
+    personal_best: i32,
+}
+
 async fn edition(
+    auth: Option<MPAuthGuard<{ privilege::PLAYER }>>,
     db: Data<Database>,
     req_id: RequestId,
     path: Path<(String, u32)>,
 ) -> RecordsResponse<impl Responder> {
     let (event_handle, edition_id) = path.into_inner();
     let (models::Event { id: event_id, .. }, edition) =
-        must::have_event_edition(&db, &event_handle, edition_id)
+        records_lib::must::have_event_edition(&db, &event_handle, edition_id)
             .await
             .fit(req_id)?;
 
@@ -233,12 +222,47 @@ async fn edition(
 
         let mut maps = Vec::with_capacity(cat_maps.size_hint().0);
 
-        for map in cat_maps.map(|e| e.map) {
-            let main_author = sqlx::query_as("SELECT * FROM players WHERE id = ?")
-                .bind(map.player_id)
-                .fetch_one(&db.mysql_pool)
+        for MapWithCategory { map, mx_id, .. } in cat_maps {
+            let AuthorWithPlayerTime {
+                main_author,
+                personal_best,
+            } = if let Some(MPAuthGuard { login }) = &auth {
+                let main_author = sqlx::query_as("select * from players where id = ?")
+                    .bind(map.player_id)
+                    .fetch_one(&db.mysql_pool)
+                    .await
+                    .with_api_err()
+                    .fit(req_id)?;
+
+                let personal_best = sqlx::query_scalar(
+                    "select time from global_records r
+                    inner join players p on p.id = r.record_player_id
+                    inner join event_edition_records eer on eer.record_id = r.record_id
+                        and eer.event_id = ? and eer.edition_id = ?
+                    where p.login = ? and r.map_id = ?",
+                )
+                .bind(event_id)
+                .bind(edition_id)
+                .bind(login)
+                .bind(map.id)
+                .fetch_optional(&db.mysql_pool)
                 .await
-                .fit(req_id)?;
+                .with_api_err()
+                .fit(req_id)?
+                .unwrap_or(-1);
+
+                Ok(AuthorWithPlayerTime {
+                    main_author,
+                    personal_best,
+                })
+            } else {
+                sqlx::query_as("select a.*, -1 as personal_best from players a where a.id = ?")
+                    .bind(map.player_id)
+                    .fetch_one(&db.mysql_pool)
+                    .await
+            }
+            .with_api_err()
+            .fit(req_id)?;
 
             let (bronze_time, silver_time, gold_time, champion_time) = sqlx::query_as("
                 select bronze.time, silver.time, gold.time, champion.time
@@ -248,9 +272,10 @@ async fn edition(
                     and bronze.map_id = silver.map_id and silver.map_id = gold.map_id and gold.map_id = champion.map_id
                     and bronze.medal_id = 1 and silver.medal_id = 2 and gold.medal_id = 3 and champion.medal_id = 4
                     and bronze.map_id = ? and bronze.event_id = ? and bronze.edition_id = ?")
-            .bind(map.id).bind(event_id).bind(edition_id).fetch_one(&db.mysql_pool).await.fit(req_id)?;
+            .bind(map.id).bind(event_id).bind(edition_id).fetch_optional(&db.mysql_pool).await.with_api_err().fit(req_id)?.unwrap_or((-1, -1, -1, -1));
 
             maps.push(Map {
+                mx_id,
                 main_author,
                 name: map.name,
                 map_uid: map.game_id,
@@ -258,6 +283,7 @@ async fn edition(
                 silver_time,
                 gold_time,
                 champion_time,
+                personal_best,
             });
         }
 
@@ -269,11 +295,12 @@ async fn edition(
         });
     }
 
-    for m in cat {
+    // Fill with empty categories
+    for cat in cat {
         categories.push(Category {
-            handle: m.handle,
-            name: m.name,
-            banner_img_url: m.banner_img_url.unwrap_or_default(),
+            handle: cat.handle,
+            name: cat.name,
+            banner_img_url: cat.banner_img_url.unwrap_or_default(),
             maps: Vec::new(),
         });
     }
@@ -283,6 +310,7 @@ async fn edition(
         name: edition.name,
         start_date: edition.start_date,
         banner_img_url: edition.banner_img_url.unwrap_or_default(),
+        mx_id: edition.mx_id.unwrap_or(-1),
         categories,
     })
 }
@@ -307,9 +335,14 @@ async fn edition_finished(
 
     // We first check that the event and its edition exist
     // and that the map is registered on it.
-    let event = must::have_event_edition_with_map(&db, &body.map_uid, event_handle, edition_id)
-        .await
-        .fit(req_id)?;
+    let event = records_lib::must::have_event_edition_with_map(
+        &db,
+        &body.map_uid,
+        event_handle,
+        edition_id,
+    )
+    .await
+    .fit(req_id)?;
 
     // Then we insert the record for the global records
     let res = pf::finished(login, &db, body, Some(&event))
@@ -329,6 +362,7 @@ async fn edition_finished(
     .bind(edition.id)
     .execute(&db.mysql_pool)
     .await
+    .with_api_err()
     .fit(req_id)?;
 
     json(res.res)
@@ -342,8 +376,13 @@ async fn edition_pb(
     body: pb::PbReq,
 ) -> RecordsResponse<impl Responder> {
     let (event_handle, edition_id) = path.into_inner();
-    let event = must::have_event_edition_with_map(&db, &body.map_uid, event_handle, edition_id)
-        .await
-        .fit(req_id)?;
+    let event = records_lib::must::have_event_edition_with_map(
+        &db,
+        &body.map_uid,
+        event_handle,
+        edition_id,
+    )
+    .await
+    .fit(req_id)?;
     pb::pb(login, req_id, db, body, Some(event)).await
 }

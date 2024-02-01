@@ -1,21 +1,5 @@
 use async_graphql::ID;
-use deadpool_redis::{redis::AsyncCommands, Connection as RedisConnection};
-use sqlx::{mysql, FromRow, MySqlConnection};
-
-use crate::models::Map;
-use crate::utils::format_map_key;
-use crate::{
-    models::{self, Record},
-    redis, RecordsResult,
-};
-
-#[derive(FromRow)]
-pub struct RecordAttr {
-    #[sqlx(flatten)]
-    pub record: Record,
-    #[sqlx(flatten)]
-    pub map: Map,
-}
+use sqlx::mysql;
 
 pub fn decode_id(id: Option<&ID>) -> Option<u32> {
     let parts: Vec<&str> = id?.split(':').collect();
@@ -142,68 +126,4 @@ pub fn connections_pages_info(
     }
 
     (has_previous_page, has_next_page)
-}
-
-/// Get the rank of a time in a map, or fully updates its leaderboard if not found.
-///
-/// The full update means a delete of the Redis key then a reinsertion of all the records.
-/// This may be called when the SQL and Redis databases had the same amount of records on a map,
-/// but the times were not corresponding. It generally happens after a database migration.
-pub async fn get_rank_or_full_update(
-    (db, redis_conn): (&mut MySqlConnection, &mut RedisConnection),
-    map @ models::Map {
-        id: map_id,
-        reversed,
-        ..
-    }: &models::Map,
-    time: i32,
-    event: Option<&(models::Event, models::EventEdition)>,
-) -> RecordsResult<i32> {
-    async fn get_rank(
-        redis_conn: &mut RedisConnection,
-        key: &str,
-        time: i32,
-        reversed: bool,
-    ) -> RecordsResult<Option<i32>> {
-        let player_id: Vec<u32> = if reversed {
-            redis_conn.zrevrangebyscore_limit(key, time, time, 0, 1)
-        } else {
-            redis_conn.zrangebyscore_limit(key, time, time, 0, 1)
-        }
-        .await?;
-
-        match player_id.first() {
-            Some(id) => {
-                let rank: i32 = if reversed {
-                    redis_conn.zrevrank(key, id)
-                } else {
-                    redis_conn.zrank(key, id)
-                }
-                .await?;
-                Ok(Some(rank + 1))
-            }
-            None => Ok(None),
-        }
-    }
-
-    let reversed = reversed.unwrap_or(false);
-    let key = &format_map_key(*map_id, event);
-
-    match get_rank(redis_conn, key, time, reversed).await? {
-        Some(rank) => Ok(rank),
-        None => {
-            redis_conn.del(key).await?;
-            redis::update_leaderboard((db, redis_conn), map, event).await?;
-            let rank = get_rank(redis_conn, key, time, reversed)
-                .await?
-                .unwrap_or_else(|| {
-                    // TODO: make a more clear message showing diff
-                    panic!(
-                        "redis leaderboard for (`{key}`) should be updated \
-                        at this point"
-                    )
-                });
-            Ok(rank)
-        }
-    }
 }

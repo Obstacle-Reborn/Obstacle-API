@@ -3,4 +3,6 @@ resolver = "2"
 members = [
     "game_api",
     "ladder_score",
+    "records_lib",
+    "socc",
 ]

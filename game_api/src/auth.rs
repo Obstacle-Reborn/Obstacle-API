@@ -57,8 +57,11 @@ use actix_web::dev::Payload;
 use actix_web::web::Data;
 use actix_web::{FromRequest, HttpRequest};
 use chrono::{DateTime, Utc};
-use deadpool_redis::redis::AsyncCommands;
+use deadpool_redis::redis::{AsyncCommands, ToRedisArgs};
 use futures::Future;
+use records_lib::models::ApiStatusKind;
+use records_lib::redis_key::{mp_token_key, web_token_key};
+use records_lib::{get_env_var_as, Database};
 use serde::{Deserialize, Serialize};
 use sha256::digest;
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -67,12 +70,9 @@ use tokio::time::timeout;
 use tracing::Level;
 use tracing_actix_web::RequestId;
 
-use crate::models::ApiStatusKind;
-use crate::utils::{
-    format_mp_token_key, format_web_token_key, generate_token, get_api_status, ApiStatus,
-};
-use crate::{get_env_var_as, must, AccessTokenErr, FitRequestId, RecordsError, RecordsResponse};
-use crate::{http::player, Database, RecordsErrorKind, RecordsResult};
+use crate::utils::{generate_token, get_api_status, ApiStatus};
+use crate::{http::player, RecordsErrorKind, RecordsResult};
+use crate::{must, AccessTokenErr, FitRequestId, RecordsError, RecordsResponse, RecordsResultExt};
 
 #[allow(unused)]
 pub mod privilege {
@@ -260,16 +260,22 @@ pub async fn gen_token_for(db: &Database, login: &str) -> RecordsResult<(String,
     let web_token = generate_token(32);
 
     let mut connection = db.redis_pool.get().await?;
-    let mp_key = format_mp_token_key(login);
-    let web_key = format_web_token_key(login);
+    let mp_key = mp_token_key(login);
+    let web_key = web_token_key(login);
 
     let ex = get_tokens_ttl() as usize;
 
     let mp_token_hash = digest(&*mp_token);
     let web_token_hash = digest(&*web_token);
 
-    connection.set_ex(mp_key, mp_token_hash, ex).await?;
-    connection.set_ex(web_key, web_token_hash, ex).await?;
+    connection
+        .set_ex(mp_key, mp_token_hash, ex)
+        .await
+        .with_api_err()?;
+    connection
+        .set_ex(web_key, web_token_hash, ex)
+        .await
+        .with_api_err()?;
     Ok((mp_token, web_token))
 }
 
@@ -278,15 +284,15 @@ async fn inner_check_auth_for(
     login: &str,
     token: &str,
     required: privilege::Flags,
-    key: String,
+    key: impl ToRedisArgs + std::marker::Sync + std::marker::Sync,
 ) -> RecordsResult<u32> {
     let mut connection = db.redis_pool.get().await?;
-    let stored_token: Option<String> = connection.get(&key).await?;
+    let stored_token: Option<String> = connection.get(&key).await.with_api_err()?;
     if !matches!(stored_token, Some(t) if t == digest(token)) {
         return Err(RecordsErrorKind::Unauthorized);
     }
 
-    let player = must::have_player(db, login).await?;
+    let player = records_lib::must::have_player(&db.mysql_pool, login).await?;
 
     if let Some(ban) = player::check_banned(&db.mysql_pool, player.id).await? {
         return Err(RecordsErrorKind::BannedPlayer(ban));
@@ -300,7 +306,8 @@ async fn inner_check_auth_for(
     )
     .bind(player.id)
     .fetch_one(&db.mysql_pool)
-    .await?;
+    .await
+    .with_api_err()?;
 
     if role & required != required {
         return Err(RecordsErrorKind::Forbidden);
@@ -319,7 +326,7 @@ pub async fn website_check_auth_for(
     token: &str,
     required: privilege::Flags,
 ) -> RecordsResult<u32> {
-    let key = format_web_token_key(login);
+    let key = web_token_key(login);
     inner_check_auth_for(db, login, token, required, key).await
 }
 
@@ -342,7 +349,7 @@ pub async fn check_auth_for(
     token: &str,
     required: privilege::Flags,
 ) -> RecordsResult<u32> {
-    let key = format_mp_token_key(login);
+    let key = mp_token_key(login);
     inner_check_auth_for(db, login, token, required, key).await
 }
 

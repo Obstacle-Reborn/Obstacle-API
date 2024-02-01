@@ -1,38 +1,31 @@
 use actix_web::dev::Payload;
-use actix_web::{FromRequest, HttpRequest};
+use actix_web::{FromRequest, HttpRequest, HttpResponse};
 use chrono::{DateTime, Utc};
 use core::fmt;
 use deadpool::managed::PoolError;
-use deadpool_redis::redis::RedisError;
 pub use deadpool_redis::Pool as RedisPool;
+use records_lib::models;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::mysql;
 pub use sqlx::MySqlPool;
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::future::{ready, Ready};
+use std::io;
 use std::ops::{Deref, DerefMut};
-use std::{io, time::Duration};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tracing_actix_web::RequestId;
 
-use self::http::event;
-use self::models::Banishment;
-
 mod auth;
 mod graphql;
 mod http;
-pub mod models;
 pub(crate) mod must;
-mod redis;
 mod utils;
 
 pub use auth::{get_tokens_ttl, AuthState};
 pub use graphql::graphql_route;
 pub use http::api_route;
-pub use utils::{get_env_var, get_env_var_as, read_env_var_file};
 
 #[derive(Deserialize, Debug, Clone)]
 #[allow(unused)] // not used in code, but displayed as debug
@@ -42,16 +35,13 @@ pub struct AccessTokenErr {
     hint: String,
 }
 
+// TODO: make a field `Lib(records_lib::error::RecordsError)`
 #[derive(Error, Debug)]
-#[repr(i32)]
+#[repr(i32)] // i32 to be used with clients that don't support unsigned integers
 pub enum RecordsErrorKind {
     // Internal server errors
     #[error(transparent)]
     IOError(#[from] io::Error) = 101,
-    #[error(transparent)]
-    MySql(#[from] sqlx::Error) = 102,
-    #[error(transparent)]
-    Redis(#[from] RedisError) = 103,
     #[error(transparent)]
     ExternalRequest(#[from] reqwest::Error) = 104,
     #[error("unknown error: {0}")]
@@ -71,7 +61,7 @@ pub enum RecordsErrorKind {
     #[error("the state has already been received by the server")]
     StateAlreadyReceived(DateTime<Utc>) = 204,
     #[error("banned player {0}")]
-    BannedPlayer(Banishment) = 205,
+    BannedPlayer(models::Banishment) = 205,
     #[error("error on sending request to MP services: {0:?}")]
     AccessTokenErr(AccessTokenErr) = 206,
     #[error("invalid ManiaPlanet code on /player/give_token request")]
@@ -82,12 +72,8 @@ pub enum RecordsErrorKind {
     // Logical errors
     #[error("not found")]
     EndpointNotFound = 301,
-    #[error("player not found in database: `{0}`")]
-    PlayerNotFound(String) = 302,
     #[error("player not banned: `{0}`")]
     PlayerNotBanned(String) = 303,
-    #[error("map not found in database")]
-    MapNotFound(String) = 304,
     #[error("unknown role with id `{0}` and name `{1}`")]
     UnknownRole(u8, String) = 305,
     #[error("unknown medal with id `{0}` and name `{1}`")]
@@ -98,16 +84,29 @@ pub enum RecordsErrorKind {
     NoRatingFound(String, String) = 308,
     #[error("invalid rates (too many, or repeated rate)")]
     InvalidRates = 309,
-    #[error("event `{0}` not found")]
-    EventNotFound(String) = 310,
-    #[error("event edition `{1}` not found for event `{0}`")]
-    EventEditionNotFound(String, u32) = 311,
-    #[error("map with uid `{0}` is not registered for event `{1}` edition {2}")]
-    MapNotInEventEdition(String, String, u32) = 312,
     #[error("invalid times")]
     InvalidTimes = 313,
     #[error("map pack id should be an integer, got `{0}`")]
     InvalidMappackId(String),
+
+    #[error(transparent)]
+    Lib(#[from] records_lib::error::RecordsError),
+}
+
+/// Converts a `Result<T, E>` in which `E` is convertible to [`records_lib::error::RecordsError`]
+/// into a [`RecordsResult<T>`].
+pub trait RecordsResultExt<T> {
+    fn with_api_err(self) -> RecordsResult<T>;
+}
+
+impl<T, E> RecordsResultExt<T> for Result<T, E>
+where
+    records_lib::error::RecordsError: From<E>,
+{
+    fn with_api_err(self) -> RecordsResult<T> {
+        self.map_err(records_lib::error::RecordsError::from)
+            .map_err(Into::into)
+    }
 }
 
 impl<E: Debug> From<PoolError<E>> for RecordsErrorKind {
@@ -160,71 +159,60 @@ struct ErrorResponse {
 
 impl actix_web::ResponseError for RecordsError {
     fn error_response(&self) -> actix_web::HttpResponse {
+        use records_lib::error::RecordsError as LR;
         use RecordsErrorKind as R;
 
         match &self.kind {
             // Internal server errors
-            R::IOError(_) => actix_web::HttpResponse::InternalServerError().json(self.to_err_res()),
-            R::MySql(_) => actix_web::HttpResponse::InternalServerError().json(self.to_err_res()),
-            R::Redis(_) => actix_web::HttpResponse::InternalServerError().json(self.to_err_res()),
-            R::ExternalRequest(_) => {
-                actix_web::HttpResponse::InternalServerError().json(self.to_err_res())
-            }
-            R::Unknown(_) => actix_web::HttpResponse::InternalServerError().json(self.to_err_res()),
-            R::Maintenance(_) => {
-                actix_web::HttpResponse::InternalServerError().json(self.to_err_res())
-            }
-            R::UnknownStatus(..) => {
-                actix_web::HttpResponse::InternalServerError().json(self.to_err_res())
-            }
+            R::IOError(_) => HttpResponse::InternalServerError().json(self.to_err_res()),
+            R::ExternalRequest(_) => HttpResponse::InternalServerError().json(self.to_err_res()),
+            R::Unknown(_) => HttpResponse::InternalServerError().json(self.to_err_res()),
+            R::Maintenance(_) => HttpResponse::InternalServerError().json(self.to_err_res()),
+            R::UnknownStatus(..) => HttpResponse::InternalServerError().json(self.to_err_res()),
 
             // Authentication errors
-            R::Unauthorized => actix_web::HttpResponse::Unauthorized().json(self.to_err_res()),
-            R::Forbidden => actix_web::HttpResponse::Forbidden().json(self.to_err_res()),
-            R::MissingGetTokenReq => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::StateAlreadyReceived(_) => {
-                actix_web::HttpResponse::BadRequest().json(self.to_err_res())
-            }
+            R::Unauthorized => HttpResponse::Unauthorized().json(self.to_err_res()),
+            R::Forbidden => HttpResponse::Forbidden().json(self.to_err_res()),
+            R::MissingGetTokenReq => HttpResponse::BadRequest().json(self.to_err_res()),
+            R::StateAlreadyReceived(_) => HttpResponse::BadRequest().json(self.to_err_res()),
             R::BannedPlayer(ban) => {
                 #[derive(Serialize)]
                 struct BannedPlayerResponse<'a> {
                     message: String,
-                    ban: &'a Banishment,
+                    ban: &'a models::Banishment,
                 }
-                actix_web::HttpResponse::Forbidden().json(BannedPlayerResponse {
+                HttpResponse::Forbidden().json(BannedPlayerResponse {
                     message: ban.to_string(),
                     ban,
                 })
             }
-            R::AccessTokenErr(_) => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::InvalidMPCode => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::Timeout => actix_web::HttpResponse::RequestTimeout().json(self.to_err_res()),
+            R::AccessTokenErr(_) => HttpResponse::BadRequest().json(self.to_err_res()),
+            R::InvalidMPCode => HttpResponse::BadRequest().json(self.to_err_res()),
+            R::Timeout => HttpResponse::RequestTimeout().json(self.to_err_res()),
 
             // Logical errors
-            R::EndpointNotFound => actix_web::HttpResponse::NotFound().json(self.to_err_res()),
-            R::PlayerNotFound(_) => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::PlayerNotBanned(_) => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::MapNotFound(_) => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::UnknownRole(..) => {
-                actix_web::HttpResponse::InternalServerError().json(self.to_err_res())
-            }
-            R::UnknownMedal(..) => {
-                actix_web::HttpResponse::InternalServerError().json(self.to_err_res())
-            }
-            R::UnknownRatingKind(..) => {
-                actix_web::HttpResponse::InternalServerError().json(self.to_err_res())
-            }
-            R::NoRatingFound(..) => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::InvalidRates => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::EventNotFound(_) => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::EventEditionNotFound(..) => {
-                actix_web::HttpResponse::BadRequest().json(self.to_err_res())
-            }
-            R::MapNotInEventEdition(..) => {
-                actix_web::HttpResponse::BadRequest().json(self.to_err_res())
-            }
-            R::InvalidTimes => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
-            R::InvalidMappackId(_) => actix_web::HttpResponse::BadRequest().json(self.to_err_res()),
+            R::EndpointNotFound => HttpResponse::NotFound().json(self.to_err_res()),
+            R::PlayerNotBanned(_) => HttpResponse::BadRequest().json(self.to_err_res()),
+            R::UnknownRole(..) => HttpResponse::InternalServerError().json(self.to_err_res()),
+            R::UnknownMedal(..) => HttpResponse::InternalServerError().json(self.to_err_res()),
+            R::UnknownRatingKind(..) => HttpResponse::InternalServerError().json(self.to_err_res()),
+            R::NoRatingFound(..) => HttpResponse::BadRequest().json(self.to_err_res()),
+            R::InvalidRates => HttpResponse::BadRequest().json(self.to_err_res()),
+            R::InvalidTimes => HttpResponse::BadRequest().json(self.to_err_res()),
+            R::InvalidMappackId(_) => HttpResponse::BadRequest().json(self.to_err_res()),
+
+            R::Lib(e) => match e {
+                // Internal server errors
+                LR::MySql(_) => HttpResponse::InternalServerError().json(self.to_err_res()),
+                LR::Redis(_) => HttpResponse::InternalServerError().json(self.to_err_res()),
+
+                // Logical errors
+                LR::PlayerNotFound(_) => HttpResponse::BadRequest().json(self.to_err_res()),
+                LR::MapNotFound(_) => HttpResponse::BadRequest().json(self.to_err_res()),
+                LR::EventNotFound(_) => HttpResponse::BadRequest().json(self.to_err_res()),
+                LR::EventEditionNotFound(..) => HttpResponse::BadRequest().json(self.to_err_res()),
+                LR::MapNotInEventEdition(..) => HttpResponse::BadRequest().json(self.to_err_res()),
+            },
         }
     }
 }
@@ -232,24 +220,6 @@ impl actix_web::ResponseError for RecordsError {
 pub type RecordsResult<T> = Result<T, RecordsErrorKind>;
 
 pub type RecordsResponse<T> = Result<T, RecordsError>;
-
-#[derive(Clone)]
-pub struct Database {
-    pub mysql_pool: MySqlPool,
-    pub redis_pool: RedisPool,
-}
-
-pub async fn get_mysql_pool() -> anyhow::Result<MySqlPool> {
-    let mysql_pool = mysql::MySqlPoolOptions::new().acquire_timeout(Duration::from_secs(10));
-
-    #[cfg(feature = "localhost_test")]
-    let url = &get_env_var("DATABASE_URL");
-    #[cfg(not(feature = "localhost_test"))]
-    let url = &read_env_var_file("DATABASE_URL");
-
-    let mysql_pool = mysql_pool.connect(url).await?;
-    Ok(mysql_pool)
-}
 
 pub trait FitRequestId<T, E> {
     fn fit(self, request_id: RequestId) -> RecordsResponse<T>;
@@ -298,17 +268,5 @@ impl FromRequest for ApiClient {
             .expect("Client should be present")
             .clone();
         ready(Ok(Self(client)))
-    }
-}
-
-pub trait GetSqlFragments {
-    fn get_sql_fragments(self) -> (&'static str, &'static str);
-}
-
-impl GetSqlFragments for Option<&(models::Event, models::EventEdition)> {
-    fn get_sql_fragments(self) -> (&'static str, &'static str) {
-        self.is_some()
-            .then(event::get_sql_fragments)
-            .unwrap_or_default()
     }
 }

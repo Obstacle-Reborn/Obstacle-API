@@ -2,19 +2,22 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_graphql::{connection, dataloader::Loader, Context, Enum, ID};
 use futures::StreamExt;
+use records_lib::{
+    escaped::Escaped, models::{self, RecordAttr, Role}, Database
+};
 use sqlx::{mysql, FromRow, MySqlPool, Row};
 
-use crate::{
-    models::{Banishment, Map, Player, RankedRecord, Role},
-    Database, RecordsErrorKind, utils::Escaped,
-};
+use crate::RecordsErrorKind;
 
 use super::{
+    ban::Banishment,
     get_rank_or_full_update,
+    map::Map,
+    record::RankedRecord,
     utils::{
         connections_append_query_string_order, connections_append_query_string_page,
         connections_bind_query_parameters_order, connections_bind_query_parameters_page,
-        connections_pages_info, decode_id, RecordAttr,
+        connections_pages_info, decode_id,
     },
     SortState,
 };
@@ -40,29 +43,41 @@ impl TryFrom<Role> for PlayerRole {
     }
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Player {
+    #[sqlx(flatten)]
+    pub inner: models::Player,
+}
+
+impl From<models::Player> for Player {
+    fn from(inner: models::Player) -> Self {
+        Self { inner }
+    }
+}
+
 #[async_graphql::Object]
 impl Player {
     pub async fn id(&self) -> ID {
-        ID(format!("v0:Player:{}", self.id))
+        ID(format!("v0:Player:{}", self.inner.id))
     }
 
-    async fn login(&self) -> &str {
-        &self.login
+    async fn login(&self) -> Escaped {
+        self.inner.login.clone().into()
     }
 
     async fn name(&self) -> Escaped {
-        self.name.clone().into()
+        self.inner.name.clone().into()
     }
 
     async fn zone_path(&self) -> Option<&str> {
-        self.zone_path.as_deref()
+        self.inner.zone_path.as_deref()
     }
 
     async fn banishments(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Banishment>> {
         let db = ctx.data_unchecked::<MySqlPool>();
         Ok(
             sqlx::query_as("SELECT * FROM banishments WHERE player_id = ?")
-                .bind(self.id)
+                .bind(self.inner.id)
                 .fetch_all(db)
                 .await?,
         )
@@ -72,7 +87,7 @@ impl Player {
         let db = ctx.data_unchecked::<MySqlPool>();
 
         let r: Role = sqlx::query_as("SELECT * FROM role WHERE id = ?")
-            .bind(self.role)
+            .bind(self.inner.role)
             .fetch_one(db)
             .await?;
 
@@ -106,9 +121,9 @@ impl Player {
 
                 // Bind the parameters
                 let mut query = sqlx::query(&query);
-                query = query.bind(self.id);
+                query = query.bind(self.inner.id);
                 query = connections_bind_query_parameters_page(query, after, before);
-                query = query.bind(self.id);
+                query = query.bind(self.inner.id);
                 query = connections_bind_query_parameters_order(query, first, last);
 
                 // Execute the query
@@ -117,7 +132,7 @@ impl Player {
                     query
                         .map(|x: mysql::MySqlRow| {
                             let cursor = ID(format!("v0:Map:{}", x.get::<u32, _>(0)));
-                            connection::Edge::new(cursor, Map::from_row(&x).unwrap())
+                            connection::Edge::new(cursor, models::Map::from_row(&x).unwrap().into())
                         })
                         .fetch_all(mysql_pool)
                         .await?;
@@ -156,7 +171,7 @@ impl Player {
         );
 
         let mut records = sqlx::query_as::<_, RecordAttr>(&query)
-            .bind(self.id)
+            .bind(self.inner.id)
             .fetch(&mut **mysql_conn);
 
         let mut ranked_records = Vec::with_capacity(records.size_hint().0);
@@ -169,7 +184,7 @@ impl Player {
             let rank =
                 get_rank_or_full_update((mysql_conn, redis_conn), &map, record.time, None).await?;
 
-            ranked_records.push(RankedRecord { rank, record });
+            ranked_records.push(models::RankedRecord { rank, record }.into());
         }
 
         Ok(ranked_records)
@@ -201,7 +216,7 @@ impl Loader<u32> for PlayerLoader {
         Ok(query
             .map(|row: mysql::MySqlRow| {
                 let player = Player::from_row(&row).unwrap();
-                (player.id, player)
+                (player.inner.id, player)
             })
             .fetch_all(&self.0)
             .await?

@@ -5,9 +5,10 @@ use actix_web::{
     web::{self, Data, Json, Query},
     HttpResponse, Responder, Scope,
 };
+use records_lib::{get_env_var, models::Banishment, read_env_var_file, Database};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, FromRow, MySql, MySqlPool};
+use sqlx::{FromRow, MySqlPool};
 use tokio::time::timeout;
 use tracing::Level;
 use tracing_actix_web::RequestId;
@@ -17,12 +18,9 @@ use crate::{
         self, privilege, ApiAvailable, AuthHeader, AuthState, MPAuthGuard, Message, WebToken,
         TIMEOUT, WEB_TOKEN_SESS_KEY,
     },
-    get_env_var,
-    models::{Banishment, Map, Player},
-    must, read_env_var_file,
     utils::json,
-    AccessTokenErr, ApiClient, Database, FitRequestId, RecordsErrorKind, RecordsResponse,
-    RecordsResult,
+    AccessTokenErr, ApiClient, FitRequestId, RecordsErrorKind, RecordsResponse, RecordsResult,
+    RecordsResultExt,
 };
 
 use super::{admin, pb, player_finished as pf};
@@ -56,7 +54,8 @@ async fn insert_player(db: &Database, body: &UpdatePlayerBody) -> RecordsResult<
     .bind(&body.name)
     .bind(&body.zone_path)
     .fetch_one(&db.mysql_pool)
-    .await?;
+    .await
+    .with_api_err()?;
 
     Ok(id)
 }
@@ -65,7 +64,8 @@ pub async fn get_or_insert(db: &Database, body: &UpdatePlayerBody) -> RecordsRes
     if let Some(id) = sqlx::query_scalar("SELECT id FROM players WHERE login = ?")
         .bind(&body.login)
         .fetch_optional(&db.mysql_pool)
-        .await?
+        .await
+        .with_api_err()?
     {
         return Ok(id);
     }
@@ -85,7 +85,7 @@ pub async fn update(
         // At this point, if Redis has registered a token with the login, it means that
         // the player is not yet added to the Obstacle database but effectively
         // has a ManiaPlanet account
-        Err(RecordsErrorKind::PlayerNotFound(_)) => {
+        Err(RecordsErrorKind::Lib(records_lib::error::RecordsError::PlayerNotFound(_))) => {
             let _ = insert_player(&db, &body).await.fit(req_id)?;
         }
         Err(e) => return Err(e).fit(req_id),
@@ -104,20 +104,10 @@ pub async fn update_player(
         .bind(body.zone_path)
         .bind(player_id)
         .execute(&db.mysql_pool)
-        .await?;
+        .await
+        .with_api_err()?;
 
     Ok(())
-}
-
-pub async fn get_player_from_login(
-    db: &Database,
-    player_login: &str,
-) -> Result<Option<Player>, RecordsErrorKind> {
-    let r = sqlx::query_as("SELECT * FROM players WHERE login = ?")
-        .bind(player_login)
-        .fetch_optional(&db.mysql_pool)
-        .await?;
-    Ok(r)
 }
 
 pub async fn check_banned(
@@ -127,18 +117,8 @@ pub async fn check_banned(
     let r = sqlx::query_as("SELECT * FROM current_bans WHERE player_id = ?")
         .bind(player_id)
         .fetch_optional(db)
-        .await?;
-    Ok(r)
-}
-
-pub async fn get_map_from_game_id<'c, E: Executor<'c, Database = MySql>>(
-    db: E,
-    map_game_id: &str,
-) -> Result<Option<Map>, RecordsErrorKind> {
-    let r = sqlx::query_as("SELECT * FROM maps WHERE game_id = ?")
-        .bind(map_game_id)
-        .fetch_optional(db)
-        .await?;
+        .await
+        .with_api_err()?;
     Ok(r)
 }
 
@@ -358,7 +338,9 @@ async fn times(
     db: Data<Database>,
     Json(body): Json<TimesBody>,
 ) -> RecordsResponse<impl Responder> {
-    let player = must::have_player(&db, &login).await.fit(req_id)?;
+    let player = records_lib::must::have_player(&db.mysql_pool, &login)
+        .await
+        .fit(req_id)?;
 
     let query = format!(
         "SELECT m.game_id AS map_uid, MIN(r.time) AS time
@@ -379,7 +361,11 @@ async fn times(
         query = query.bind(map_uid);
     }
 
-    let result = query.fetch_all(&db.mysql_pool).await.fit(req_id)?;
+    let result = query
+        .fetch_all(&db.mysql_pool)
+        .await
+        .with_api_err()
+        .fit(req_id)?;
     json(result)
 }
 
@@ -410,9 +396,13 @@ pub async fn info(
     .bind(&body.login)
     .fetch_optional(&db.mysql_pool)
     .await
+    .with_api_err()
     .fit(req_id)?
     else {
-        return Err(RecordsErrorKind::PlayerNotFound(body.login)).fit(req_id);
+        return Err(RecordsErrorKind::from(
+            records_lib::error::RecordsError::PlayerNotFound(body.login),
+        ))
+        .fit(req_id);
     };
 
     json(info)
