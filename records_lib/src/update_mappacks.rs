@@ -1,5 +1,5 @@
 use async_graphql::SimpleObject;
-use deadpool_redis::redis::AsyncCommands;
+use deadpool_redis::redis::{AsyncCommands, Cmd, SetExpiry, SetOptions};
 use sqlx::{pool::PoolConnection, MySql};
 #[cfg(feature = "tracing")]
 use tracing::Instrument;
@@ -102,24 +102,23 @@ pub async fn update_mappack(
 
     // Then save them to the Redis database for cache-handling
 
+    let no_ttl: Vec<String> = redis_conn.smembers(NoTtlMappacks).await?;
+    let mappack_ttl = no_ttl
+        .iter()
+        .all(|x| x != mappack_id)
+        .then(|| get_env_var_as("RECORDS_API_MAPPACK_TTL"));
+
     #[cfg(feature = "tracing")]
     {
         // Spans the score storage process
-        let span = tracing::info_span!("saving scores", mappack_key = key_str);
-        async { save(mappack_id, scores, redis_conn).await }
+        let span = tracing::info_span!("saving scores", mappack_key = key_str, ttl = mappack_ttl);
+        async { save(mappack_id, scores, mappack_ttl, redis_conn).await }
             .instrument(span)
             .await?;
     }
     #[cfg(not(feature = "tracing"))]
     {
-        save(mappack_id, scores, redis_conn).await?;
-    }
-
-    // Update the expiration time of the redis key, if it's not registered as a "non-TTL mappack"
-    let no_ttl: Vec<String> = redis_conn.smembers(NoTtlMappacks).await?;
-    if no_ttl.iter().all(|x| x != mappack_id) {
-        let mappack_ttl = get_env_var_as("RECORDS_API_MAPPACK_TTL");
-        redis_conn.expire(key, mappack_ttl).await?;
+        save(mappack_id, scores, mappack_ttl, redis_conn).await?;
     }
 
     // And we save it to the registered mappacks set.
@@ -129,18 +128,36 @@ pub async fn update_mappack(
     Ok(())
 }
 
+// FIXME: this involves a lot of repetitive code
 async fn save(
     mappack_id: &str,
     scores: MappackScores,
+    mappack_ttl: Option<usize>,
     redis_conn: &mut RedisConnection,
 ) -> RecordsResult<()> {
     #[cfg(feature = "tracing")]
     tracing::info!("Saving scores");
 
+    let set_options = SetOptions::default();
+
+    let set_options = match mappack_ttl {
+        Some(ex) => {
+            // Update expiration time of some keys btw
+            redis_conn.expire(mappack_key(mappack_id), ex).await?;
+            redis_conn.expire(mappack_lb_key(mappack_id), ex).await?;
+
+            set_options.with_expiration(SetExpiry::EX(ex))
+        }
+        None => set_options,
+    };
+
     // --- Save the number of maps of the campaign
 
     let key = mappack_nb_map_key(mappack_id);
-    redis_conn.set(&key, scores.maps.len()).await?;
+    Cmd::set(&key, scores.maps.len())
+        .arg(&set_options)
+        .query_async(redis_conn)
+        .await?;
 
     #[cfg(feature = "tracing")]
     tracing::info!("Saved key: `{key}`");
@@ -148,17 +165,16 @@ async fn save(
     for map in &scores.maps {
         // --- Save the last rank on each map
 
-        redis_conn
-            .set(
-                mappack_map_last_rank(mappack_id, &map.map_id),
-                map.last_rank,
-            )
-            .await?;
+        Cmd::set(
+            mappack_map_last_rank(mappack_id, &map.map_id),
+            map.last_rank,
+        )
+        .arg(&set_options)
+        .query_async(redis_conn)
+        .await?;
     }
 
     for score in scores.scores {
-        // --- Save the campaign leaderboard
-
         redis_conn
             .zadd(mappack_lb_key(mappack_id), score.player_id, score.rank)
             .await?;
@@ -166,30 +182,40 @@ async fn save(
         // --- Save the rank average
 
         let rank_avg = ((score.score + f64::EPSILON) * 100.).round() / 100.;
-        redis_conn
-            .set(
-                mappack_player_rank_avg_key(mappack_id, score.player_id),
-                rank_avg,
-            )
-            .await?;
+
+        Cmd::set(
+            mappack_player_rank_avg_key(mappack_id, score.player_id),
+            rank_avg,
+        )
+        .arg(&set_options)
+        .query_async(redis_conn)
+        .await?;
 
         // --- Save the amount of finished map
 
-        redis_conn
-            .set(
-                mappack_player_map_finished_key(mappack_id, score.player_id),
-                score.maps_finished,
-            )
-            .await?;
+        Cmd::set(
+            mappack_player_map_finished_key(mappack_id, score.player_id),
+            score.maps_finished,
+        )
+        .arg(&set_options)
+        .query_async(redis_conn)
+        .await?;
 
         // --- Save their worst rank
 
-        redis_conn
-            .set(
-                mappack_player_worst_rank_key(mappack_id, score.player_id),
-                score.worst.rank,
-            )
-            .await?;
+        Cmd::set(
+            mappack_player_worst_rank_key(mappack_id, score.player_id),
+            score.worst.rank,
+        )
+        .arg(&set_options)
+        .query_async(redis_conn)
+        .await?;
+
+        if let Some(ttl) = mappack_ttl {
+            redis_conn
+                .expire(mappack_player_ranks_key(mappack_id, score.player_id), ttl)
+                .await?;
+        }
 
         for (game_id, rank) in score
             .ranks
@@ -228,6 +254,8 @@ async fn calc_scores(
     let mappack = if mappack_uids.is_empty() {
         // If the mappack is empty, it means either that it's an invalid/unknown mappack ID,
         // or that its TTL has expired. So we remove its entry in the registered mappacks set.
+        // The other keys related to this mappack were set with a TTL so they should
+        // be deleted too.
         let _: i32 = redis_conn.srem(mappacks_key(), mappack_id).await?;
         return Ok(None);
     } else {
