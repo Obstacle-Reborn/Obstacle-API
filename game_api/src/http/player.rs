@@ -5,7 +5,10 @@ use actix_web::{
     web::{self, Data, Json, Query},
     HttpResponse, Responder, Scope,
 };
-use records_lib::{get_env_var, models::Banishment, read_env_var_file, Database};
+use deadpool_redis::redis::AsyncCommands;
+use records_lib::{
+    get_env_var, models::Banishment, must, read_env_var_file, redis_key::mappack_key, Database,
+};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, MySqlPool};
@@ -205,7 +208,35 @@ async fn finished(
     db: Data<Database>,
     body: pf::PlayerFinishedBody,
 ) -> RecordsResponse<impl Responder> {
-    let res = pf::finished(login, &db, body, None).await.fit(req_id)?.res;
+    // FIXME: this is used as a transition statement for the incoming Winter season.
+    // It should be removed after the update.
+    let event = {
+        let redis_conn = &mut db.redis_pool.get().await.fit(req_id)?;
+        let summer_campaign_uids: Vec<String> = redis_conn
+            .smembers(mappack_key("29"))
+            .await
+            .with_api_err()
+            .fit(req_id)?;
+        if summer_campaign_uids.contains(&body.map_uid) {
+            Some(
+                must::have_event_edition(
+                    &mut *db.mysql_pool.acquire().await.with_api_err().fit(req_id)?,
+                    "campaign",
+                    1,
+                )
+                .await
+                .with_api_err()
+                .fit(req_id)?,
+            )
+        } else {
+            None
+        }
+    };
+
+    let res = pf::finished(login, &db, body, event.as_ref())
+        .await
+        .fit(req_id)?
+        .res;
     json(res)
 }
 
