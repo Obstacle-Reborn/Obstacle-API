@@ -6,9 +6,12 @@ use async_graphql::{
 };
 use sqlx::{mysql, FromRow, MySqlPool};
 
-use records_lib::models::{self, EventCategory};
+use records_lib::{
+    models::{self, EventCategory},
+    must,
+};
 
-use super::player::Player;
+use super::{mappack::Mappack, player::Player};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Event {
@@ -95,6 +98,18 @@ impl Event {
             .await?;
         Ok(q)
     }
+
+    async fn edition(
+        &self,
+        ctx: &Context<'_>,
+        edition_id: u32,
+    ) -> async_graphql::Result<EventEdition> {
+        let db = ctx.data_unchecked::<MySqlPool>();
+        let mysql_conn = &mut db.acquire().await?;
+        let (_, edition) =
+            must::have_event_edition(mysql_conn, &self.inner.handle, edition_id).await?;
+        Ok(edition.into())
+    }
 }
 
 pub struct EventLoader(pub MySqlPool);
@@ -167,6 +182,11 @@ impl Loader<u32> for EventCategoryLoader {
 impl EventEdition {
     async fn id(&self) -> u32 {
         self.inner.id
+    }
+
+    async fn mappack(&self) -> Option<Mappack> {
+        let mappack_id = self.inner.mx_id?.to_string();
+        Some(Mappack { mappack_id })
     }
 
     async fn event(&self, ctx: &Context<'_>) -> async_graphql::Result<Event> {

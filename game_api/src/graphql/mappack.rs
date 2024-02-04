@@ -54,7 +54,7 @@ async fn fill_mappack(
 }
 
 pub struct Mappack {
-    mappack_id: String,
+    pub(crate) mappack_id: String,
 }
 
 #[derive(SimpleObject)]

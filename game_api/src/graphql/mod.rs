@@ -9,7 +9,7 @@ use async_graphql_actix_web::GraphQLRequest;
 use futures::StreamExt;
 use records_lib::models::{self, RecordAttr};
 use records_lib::update_ranks::get_rank_or_full_update;
-use records_lib::Database;
+use records_lib::{must, Database};
 use reqwest::Client;
 use sqlx::{mysql, query_as, FromRow, MySqlPool, Row};
 use std::env::var;
@@ -88,6 +88,16 @@ impl QueryRoot {
         Ok(query_as("SELECT * FROM banishments")
             .fetch_all(&db.mysql_pool)
             .await?)
+    }
+
+    async fn event(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        handle: String,
+    ) -> async_graphql::Result<Event> {
+        let db = ctx.data_unchecked::<MySqlPool>();
+        let event = must::have_event_handle(&mut *db.acquire().await?, &handle).await?;
+        Ok(event.into())
     }
 
     async fn events(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<Vec<Event>> {
