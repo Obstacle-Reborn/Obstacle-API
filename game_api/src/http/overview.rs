@@ -162,7 +162,7 @@ pub async fn overview(
     let event = match event {
         Some((event_handle, edition_id)) => Some(
             records_lib::must::have_event_edition_with_map(
-                &db,
+                mysql_conn,
                 &body.map_uid,
                 event_handle,
                 edition_id,

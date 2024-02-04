@@ -163,7 +163,10 @@ async fn event_editions(
     event_handle: Path<String>,
 ) -> RecordsResponse<impl Responder> {
     let event_handle = event_handle.into_inner();
-    let id = records_lib::must::have_event_handle(&db, &event_handle)
+
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
+
+    let id = records_lib::must::have_event_handle(mysql_conn, &event_handle)
         .await
         .fit(req_id)?
         .id;
@@ -171,7 +174,7 @@ async fn event_editions(
     let res: Vec<EventHandleResponse> =
         sqlx::query_as("SELECT * FROM event_edition WHERE event_id = ? ORDER BY id DESC")
             .bind(id)
-            .fetch_all(&db.mysql_pool)
+            .fetch_all(&mut **mysql_conn)
             .await
             .with_api_err()
             .fit(req_id)?;
@@ -195,8 +198,11 @@ async fn edition(
     path: Path<(String, u32)>,
 ) -> RecordsResponse<impl Responder> {
     let (event_handle, edition_id) = path.into_inner();
+
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
+
     let (models::Event { id: event_id, .. }, edition) =
-        records_lib::must::have_event_edition(&db, &event_handle, edition_id)
+        records_lib::must::have_event_edition(mysql_conn, &event_handle, edition_id)
             .await
             .fit(req_id)?;
 
@@ -333,10 +339,12 @@ async fn edition_finished(
 ) -> RecordsResponse<impl Responder> {
     let (event_handle, edition_id) = path.into_inner();
 
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
+
     // We first check that the event and its edition exist
     // and that the map is registered on it.
     let event = records_lib::must::have_event_edition_with_map(
-        &db,
+        mysql_conn,
         &body.map_uid,
         event_handle,
         edition_id,
@@ -376,8 +384,11 @@ async fn edition_pb(
     body: pb::PbReq,
 ) -> RecordsResponse<impl Responder> {
     let (event_handle, edition_id) = path.into_inner();
+
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
+
     let event = records_lib::must::have_event_edition_with_map(
-        &db,
+        mysql_conn,
         &body.map_uid,
         event_handle,
         edition_id,

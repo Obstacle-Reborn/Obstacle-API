@@ -122,7 +122,9 @@ pub async fn finished(
     event: Option<&(models::Event, models::EventEdition)>,
 ) -> RecordsResult<FinishedOutput> {
     // First, we retrieve all what we need to save the record
-    let player_id = records_lib::must::have_player(&db.mysql_pool, &login).await?.id;
+    let player_id = records_lib::must::have_player(&db.mysql_pool, &login)
+        .await?
+        .id;
     let ref map @ Map {
         id: map_id,
         cps_number,

@@ -10,21 +10,24 @@
 //! things to be already existing, without checking it repeatedly and returning the error to
 //! the client.
 
-use sqlx::{Executor, MySql};
+use sqlx::{Executor, MySql, MySqlConnection};
 
 use crate::{
     error::{RecordsError, RecordsResult},
-    event, map, models, player, Database,
+    event, map, models, player,
 };
 
-pub async fn have_event_handle(db: &Database, handle: &str) -> RecordsResult<models::Event> {
+pub async fn have_event_handle(
+    db: &mut MySqlConnection,
+    handle: &str,
+) -> RecordsResult<models::Event> {
     event::get_event_by_handle(db, handle)
         .await?
         .ok_or_else(|| RecordsError::EventNotFound(handle.to_owned()))
 }
 
 pub async fn have_event_edition(
-    db: &Database,
+    db: &mut MySqlConnection,
     event_handle: &str,
     edition_id: u32,
 ) -> RecordsResult<(models::Event, models::EventEdition)> {
@@ -59,7 +62,7 @@ pub async fn have_map<'c, E: Executor<'c, Database = MySql>>(
 }
 
 pub async fn have_event_edition_with_map(
-    db: &Database,
+    db: &mut MySqlConnection,
     game_id: &str,
     event_handle: String,
     edition_id: u32,
@@ -75,7 +78,7 @@ pub async fn have_event_edition_with_map(
     .bind(event_edition.id)
     .bind(event.id)
     .bind(game_id)
-    .fetch_one(&db.mysql_pool)
+    .fetch_one(db)
     .await?
         == 0
     {
