@@ -189,6 +189,23 @@ impl EventEdition {
         Some(Mappack { mappack_id })
     }
 
+    async fn admins(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<Player>> {
+        let db = ctx.data_unchecked::<MySqlPool>();
+        let q = sqlx::query_as(
+            "SELECT * FROM players
+            WHERE id IN (
+                SELECT player_id FROM event_edition_admins
+                WHERE event_id = ? AND edition_id = ?
+            )",
+        )
+        .bind(self.inner.event_id)
+        .bind(self.inner.id)
+        .fetch_all(db)
+        .await?;
+
+        Ok(q)   
+    }
+
     async fn event(&self, ctx: &Context<'_>) -> async_graphql::Result<Event> {
         ctx.data_unchecked::<DataLoader<EventLoader>>()
             .load_one(self.inner.event_id)
