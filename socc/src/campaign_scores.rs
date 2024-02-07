@@ -13,7 +13,19 @@ pub async fn update(
 ) -> anyhow::Result<()> {
     let mappacks: Vec<String> = redis_conn.smembers(mappacks_key()).await?;
 
-    tracing::info!("Updating mappacks: `{}`", mappacks.join(", "));
+    if mappacks.is_empty() {
+        tracing::warn!("No mappacks to update");
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Updating mappacks: {}",
+        mappacks
+            .iter()
+            .map(|s| format!("`{s}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     for mappack_id in &mappacks {
         update_mappack(mappack_id, &mut mysql_conn, &mut redis_conn).await?;
