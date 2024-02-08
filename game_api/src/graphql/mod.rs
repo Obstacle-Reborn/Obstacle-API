@@ -4,7 +4,7 @@ use actix_web::{HttpResponse, Resource, Responder};
 use async_graphql::dataloader::DataLoader;
 use async_graphql::extensions::ApolloTracing;
 use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
-use async_graphql::{connection, Enum, ErrorExtensionValues, Value, ID};
+use async_graphql::{connection, Enum, ErrorExtensionValues, Object, Value, ID};
 use async_graphql_actix_web::GraphQLRequest;
 use futures::StreamExt;
 use records_lib::models::{self, RecordAttr};
@@ -63,10 +63,22 @@ enum Node {
     Player(Player),
 }
 
-pub struct QueryRoot;
+struct QueryRoot;
 
 #[async_graphql::Object]
 impl QueryRoot {
+    async fn resources_content(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<models::ResourcesContent> {
+        let mysql_pool = ctx.data_unchecked::<MySqlPool>();
+        let txt = sqlx::query_as("SELECT * FROM resources_content")
+            .fetch_one(mysql_pool)
+            .await?;
+        Ok(txt)
+    }
+
+    // TODO: return info of mappack if retrieved from MX (new redis keys)
     async fn mappack(
         &self,
         ctx: &async_graphql::Context<'_>,
@@ -341,42 +353,66 @@ impl QueryRoot {
     }
 }
 
-pub type Schema = async_graphql::Schema<
-    QueryRoot,
-    async_graphql::EmptyMutation,
-    async_graphql::EmptySubscription,
->;
+struct MutationRoot;
+
+#[Object]
+impl MutationRoot {
+    async fn update_resources_content(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        text: String,
+    ) -> async_graphql::Result<models::ResourcesContent> {
+        let mysql_pool = ctx.data_unchecked::<MySqlPool>();
+        sqlx::query("UPDATE resources_content SET content = ?, last_modified = SYSDATE()")
+            .bind(text)
+            .execute(mysql_pool)
+            .await?;
+        let res = sqlx::query_as("SELECT * FROM resources_content")
+            .fetch_one(mysql_pool)
+            .await?;
+        Ok(res)
+    }
+
+    async fn calc_mappack_scores(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        mappack_id: String,
+    ) -> async_graphql::Result<Mappack> {
+        self::mappack::calc_scores(ctx, mappack_id)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+type Schema = async_graphql::Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
 
 #[allow(clippy::let_and_return)]
 fn create_schema(db: Database, client: Client) -> Schema {
-    let schema = async_graphql::Schema::build(
-        QueryRoot,
-        async_graphql::EmptyMutation,
-        async_graphql::EmptySubscription,
-    )
-    .extension(ApolloTracing)
-    .data(DataLoader::new(
-        PlayerLoader(db.mysql_pool.clone()),
-        tokio::spawn,
-    ))
-    .data(DataLoader::new(
-        MapLoader(db.mysql_pool.clone()),
-        tokio::spawn,
-    ))
-    .data(DataLoader::new(
-        EventLoader(db.mysql_pool.clone()),
-        tokio::spawn,
-    ))
-    .data(DataLoader::new(
-        EventCategoryLoader(db.mysql_pool.clone()),
-        tokio::spawn,
-    ))
-    .data(db.mysql_pool.clone())
-    .data(db.redis_pool.clone())
-    .data(db)
-    .data(client)
-    .limit_depth(16)
-    .finish();
+    let schema =
+        async_graphql::Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
+            .extension(ApolloTracing)
+            .data(DataLoader::new(
+                PlayerLoader(db.mysql_pool.clone()),
+                tokio::spawn,
+            ))
+            .data(DataLoader::new(
+                MapLoader(db.mysql_pool.clone()),
+                tokio::spawn,
+            ))
+            .data(DataLoader::new(
+                EventLoader(db.mysql_pool.clone()),
+                tokio::spawn,
+            ))
+            .data(DataLoader::new(
+                EventCategoryLoader(db.mysql_pool.clone()),
+                tokio::spawn,
+            ))
+            .data(db.mysql_pool.clone())
+            .data(db.redis_pool.clone())
+            .data(db)
+            .data(client)
+            .limit_depth(16)
+            .finish();
 
     #[cfg(feature = "output_gql_schema")]
     {

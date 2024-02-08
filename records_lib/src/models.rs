@@ -288,3 +288,9 @@ impl<'r> FromRow<'r, MySqlRow> for ApiStatusKind {
         }
     }
 }
+
+#[derive(Serialize, FromRow, Clone, Debug, SimpleObject)]
+pub struct ResourcesContent {
+    content: String,
+    last_modified: chrono::NaiveDateTime,
+}
