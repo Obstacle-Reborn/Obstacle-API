@@ -21,7 +21,7 @@ use crate::graphql::map::MapLoader;
 use crate::graphql::player::PlayerLoader;
 
 use self::ban::Banishment;
-use self::event::{Event, EventCategoryLoader, EventLoader};
+use self::event::{Event, EventCategoryLoader, EventEdition, EventLoader, MutableEvent};
 use self::map::Map;
 use self::mappack::Mappack;
 use self::player::Player;
@@ -72,13 +72,30 @@ impl QueryRoot {
         ctx: &async_graphql::Context<'_>,
     ) -> async_graphql::Result<models::ResourcesContent> {
         let mysql_pool = ctx.data_unchecked::<MySqlPool>();
-        let txt = sqlx::query_as("SELECT * FROM resources_content")
+        let txt = sqlx::query_as(
+            "SELECT content, created_at AS last_modified
+            FROM resources_content
+            ORDER BY created_at DESC
+            LIMIT 1"
+        )
             .fetch_one(mysql_pool)
             .await?;
         Ok(txt)
     }
 
-    // TODO: return info of mappack if retrieved from MX (new redis keys)
+    async fn event_edition_from_mx_id(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        mx_id: i64,
+    ) -> async_graphql::Result<Option<EventEdition>> {
+        let mysql_pool = ctx.data_unchecked::<MySqlPool>();
+        let res = sqlx::query_as("SELECT * FROM event_edition WHERE mx_id = ?")
+            .bind(mx_id)
+            .fetch_optional(mysql_pool)
+            .await?;
+        Ok(res)
+    }
+
     async fn mappack(
         &self,
         ctx: &async_graphql::Context<'_>,
@@ -357,13 +374,23 @@ struct MutationRoot;
 
 #[Object]
 impl MutationRoot {
+    async fn event(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        handle: String,
+    ) -> async_graphql::Result<MutableEvent> {
+        let db = ctx.data_unchecked::<MySqlPool>();
+        let event = must::have_event_handle(&mut *db.acquire().await?, &handle).await?;
+        Ok(event.into())
+    }
+
     async fn update_resources_content(
         &self,
         ctx: &async_graphql::Context<'_>,
         text: String,
     ) -> async_graphql::Result<models::ResourcesContent> {
         let mysql_pool = ctx.data_unchecked::<MySqlPool>();
-        sqlx::query("UPDATE resources_content SET content = ?, last_modified = SYSDATE()")
+        sqlx::query("INSERT INTO resources_content (content, created_at) VALUES (?, SYSDATE())")
             .bind(text)
             .execute(mysql_pool)
             .await?;

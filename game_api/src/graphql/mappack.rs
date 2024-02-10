@@ -3,7 +3,8 @@ use deadpool_redis::{redis::AsyncCommands, Connection as RedisConnection};
 use records_lib::{
     must, player,
     redis_key::{
-        mappack_key, mappack_lb_key, mappack_map_last_rank, mappack_nb_map_key,
+        mappack_key, mappack_lb_key, mappack_map_last_rank, mappack_mx_created_key,
+        mappack_mx_name_key, mappack_mx_username_key, mappack_nb_map_key,
         mappack_player_map_finished_key, mappack_player_rank_avg_key, mappack_player_ranks_key,
         mappack_player_worst_rank_key, MappackKey,
     },
@@ -24,6 +25,14 @@ struct MXMappackResponseItem {
     TrackUID: String,
 }
 
+#[derive(Deserialize)]
+#[allow(non_snake_case)]
+struct MXMappackInfoResponse {
+    Username: String,
+    Name: String,
+    Created: String,
+}
+
 async fn fill_mappack(
     client: &Client,
     db: &mut MySqlConnection,
@@ -31,17 +40,36 @@ async fn fill_mappack(
     mappack_key: &MappackKey<'_>,
     mappack_id: u32,
 ) -> RecordsResult<()> {
-    let res: Vec<MXMappackResponseItem> = client
-        .get(format!(
-            "https://sm.mania.exchange/api/mappack/get_mappack_tracks/{mappack_id}"
-        ))
-        .header("User-Agent", "obstacle (ahmadbky@5382)")
-        .send()
-        .await?
-        .json()
-        .await?;
+    let maps = async {
+        let res: Vec<MXMappackResponseItem> = client
+            .get(format!(
+                "https://sm.mania.exchange/api/mappack/get_mappack_tracks/{mappack_id}"
+            ))
+            .header("User-Agent", "obstacle (ahmadbky@5382)")
+            .send()
+            .await?
+            .json()
+            .await?;
+        RecordsResult::Ok(res)
+    };
 
-    for MXMappackResponseItem { TrackUID } in res {
+    let info = async {
+        let res: MXMappackInfoResponse = client
+            .get(format!(
+                "https://sm.mania.exchange/api/mappack/get_info/{mappack_id}"
+            ))
+            .header("User-Agent", "obstacle (ahmadbky@5382)")
+            .send()
+            .await?
+            .json()
+            .await?;
+        RecordsResult::Ok(res)
+    };
+
+    let (maps, info) = tokio::join!(maps, info);
+    let (maps, info) = (maps?, info?);
+
+    for MXMappackResponseItem { TrackUID } in maps {
         // We check that the map exists in our database
         let _ = must::have_map(&mut *db, &TrackUID).await?;
         redis_conn
@@ -49,6 +77,27 @@ async fn fill_mappack(
             .await
             .with_api_err()?;
     }
+
+    let mappack_id = &mappack_id.to_string();
+
+    // --------
+    // These keys would probably be null for some mappacks, because they would belong
+    // to an event edition, so these info would be retrieved from our information system.
+
+    redis_conn
+        .set(mappack_mx_username_key(mappack_id), info.Username)
+        .await
+        .with_api_err()?;
+
+    redis_conn
+        .set(mappack_mx_name_key(mappack_id), info.Name)
+        .await
+        .with_api_err()?;
+
+    redis_conn
+        .set(mappack_mx_created_key(mappack_id), info.Created)
+        .await
+        .with_api_err()?;
 
     Ok(())
 }
@@ -169,6 +218,42 @@ impl Mappack {
         let redis_conn = &mut redis_pool.get().await?;
         let nb_map = redis_conn.get(mappack_nb_map_key(&self.mappack_id)).await?;
         Ok(nb_map)
+    }
+
+    async fn mx_author(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<String>> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let author = redis_conn
+            .get(mappack_mx_username_key(&self.mappack_id))
+            .await?;
+        Ok(author)
+    }
+
+    async fn mx_created_at(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<chrono::NaiveDateTime>> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let created_at: Option<String> = redis_conn
+            .get(mappack_mx_created_key(&self.mappack_id))
+            .await?;
+        Ok(created_at.map(|s| s.parse()).transpose()?)
+    }
+
+    async fn mx_name(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<String>> {
+        let redis_pool = ctx.data_unchecked::<RedisPool>();
+        let redis_conn = &mut redis_pool.get().await?;
+        let name = redis_conn
+            .get(mappack_mx_name_key(&self.mappack_id))
+            .await?;
+        Ok(name)
     }
 
     async fn leaderboard<'a>(

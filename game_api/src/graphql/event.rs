@@ -2,13 +2,13 @@ use std::{collections::HashMap, iter::repeat, sync::Arc};
 
 use async_graphql::{
     dataloader::{DataLoader, Loader},
-    Context,
+    Context, InputObject, MergedObject,
 };
 use sqlx::{mysql, FromRow, MySqlPool};
 
 use records_lib::{
+    event,
     models::{self, EventCategory},
-    must,
 };
 
 use super::{mappack::Mappack, player::Player};
@@ -21,30 +21,6 @@ pub struct Event {
 
 impl From<models::Event> for Event {
     fn from(inner: models::Event) -> Self {
-        Self { inner }
-    }
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct EventEdition {
-    #[sqlx(flatten)]
-    inner: models::EventEdition,
-}
-
-impl From<models::EventEdition> for EventEdition {
-    fn from(inner: models::EventEdition) -> Self {
-        Self { inner }
-    }
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct EventEditionMaps {
-    #[sqlx(flatten)]
-    inner: models::EventEditionMaps,
-}
-
-impl From<models::EventEditionMaps> for EventEditionMaps {
-    fn from(inner: models::EventEditionMaps) -> Self {
         Self { inner }
     }
 }
@@ -99,16 +75,29 @@ impl Event {
         Ok(q)
     }
 
+    async fn last_edition(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<EventEdition>> {
+        let db = ctx.data_unchecked::<MySqlPool>();
+        let edition: Option<models::EventEdition> = sqlx::query_as(
+            "SELECT * FROM event_edition
+            WHERE event_id = ?
+            ORDER BY id DESC
+            LIMIT 1",
+        )
+        .bind(self.inner.id)
+        .fetch_optional(db)
+        .await?;
+        Ok(edition.map(Into::into))
+    }
+
     async fn edition(
         &self,
         ctx: &Context<'_>,
         edition_id: u32,
-    ) -> async_graphql::Result<EventEdition> {
+    ) -> async_graphql::Result<Option<EventEdition>> {
         let db = ctx.data_unchecked::<MySqlPool>();
         let mysql_conn = &mut db.acquire().await?;
-        let (_, edition) =
-            must::have_event_edition(mysql_conn, &self.inner.handle, edition_id).await?;
-        Ok(edition.into())
+        let edition = event::get_edition_by_id(mysql_conn, self.inner.id, edition_id).await?;
+        Ok(edition.map(Into::into))
     }
 }
 
@@ -145,6 +134,42 @@ impl Loader<u32> for EventLoader {
     }
 }
 
+struct MutableEventInner {
+    _event_id: u32,
+}
+
+#[derive(InputObject)]
+struct CreateEditionParams {
+    edition_id: u32,
+    banner_img_url: Option<String>,
+    mx_id: i64,
+}
+
+#[async_graphql::Object]
+impl MutableEventInner {
+    async fn create_edition(
+        &self,
+        _ctx: &Context<'_>,
+        _params: CreateEditionParams,
+    ) -> async_graphql::Result<EventEdition> {
+        todo!()
+    }
+}
+
+#[derive(MergedObject)]
+pub struct MutableEvent(MutableEventInner, Event);
+
+impl From<models::Event> for MutableEvent {
+    fn from(event: models::Event) -> Self {
+        Self(
+            MutableEventInner {
+                _event_id: event.id,
+            },
+            event.into(),
+        )
+    }
+}
+
 pub struct EventCategoryLoader(pub MySqlPool);
 
 #[async_graphql::async_trait::async_trait]
@@ -178,6 +203,18 @@ impl Loader<u32> for EventCategoryLoader {
     }
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EventEdition {
+    #[sqlx(flatten)]
+    inner: models::EventEdition,
+}
+
+impl From<models::EventEdition> for EventEdition {
+    fn from(inner: models::EventEdition) -> Self {
+        Self { inner }
+    }
+}
+
 #[async_graphql::Object]
 impl EventEdition {
     async fn id(&self) -> u32 {
@@ -203,7 +240,7 @@ impl EventEdition {
         .fetch_all(db)
         .await?;
 
-        Ok(q)   
+        Ok(q)
     }
 
     async fn event(&self, ctx: &Context<'_>) -> async_graphql::Result<Event> {
@@ -239,6 +276,18 @@ impl EventEdition {
         .fetch_all(db)
         .await?;
         Ok(q)
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EventEditionMaps {
+    #[sqlx(flatten)]
+    inner: models::EventEditionMaps,
+}
+
+impl From<models::EventEditionMaps> for EventEditionMaps {
+    fn from(inner: models::EventEditionMaps) -> Self {
+        Self { inner }
     }
 }
 
