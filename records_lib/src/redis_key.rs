@@ -18,6 +18,9 @@ const V3_TOKEN_WEB_KEY_PREFIX: &str = "web";
 const V3_TOKEN_MP_KEY_PREFIX: &str = "mp";
 
 const V3_MAPPACK_NB_MAP: &str = "nb_map";
+const V3_MAPPACK_MX_USERNAME: &str = "mx_username";
+const V3_MAPPACK_MX_NAME: &str = "mx_name";
+const V3_MAPPACK_MX_CREATED: &str = "mx_created";
 const V3_MAPPACK_LB: &str = "lb";
 const V3_MAPPACK_LB_RANK_AVG: &str = "rank_avg";
 const V3_MAPPACK_LB_MAP_FINISHED: &str = "map_finished";
@@ -213,6 +216,33 @@ create_key! {
     |self, f| write!(
         f,
         "{V3_KEY_PREFIX}:{V3_MAPPACK_KEY_PREFIX}:{}:{V3_MAPPACK_NB_MAP}",
+        self.mappack_id
+    )
+}
+
+create_key! {
+    struct MappackMxUsernameKey<'a => '_> = mappack_mx_username_key {
+        mappack_id: &'a str,
+    }
+    |self, f| write!(f, "{V3_KEY_PREFIX}:{V3_MAPPACK_KEY_PREFIX}:{}:{V3_MAPPACK_MX_USERNAME}",
+        self.mappack_id
+    )
+}
+
+create_key! {
+    struct MappackMxNameKey<'a => '_> = mappack_mx_name_key {
+        mappack_id: &'a str,
+    }
+    |self, f| write!(f, "{V3_KEY_PREFIX}:{V3_MAPPACK_KEY_PREFIX}:{}:{V3_MAPPACK_MX_NAME}",
+        self.mappack_id
+    )
+}
+
+create_key! {
+    struct MappackMxCreatedKey<'a => '_> = mappack_mx_created_key {
+        mappack_id: &'a str,
+    }
+    |self, f| write!(f, "{V3_KEY_PREFIX}:{V3_MAPPACK_KEY_PREFIX}:{}:{V3_MAPPACK_MX_CREATED}",
         self.mappack_id
     )
 }
