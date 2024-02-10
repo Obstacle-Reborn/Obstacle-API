@@ -66,9 +66,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "localhost_test")]
         let cors = cors.allow_any_origin();
         #[cfg(not(feature = "localhost_test"))]
-        let cors = cors
-            .allowed_origin("https://www.obstacle.ovh")
-            .allowed_origin(&localhost_origin);
+        let cors = cors.allowed_origin(&localhost_origin);
 
         App::new()
             .wrap(cors)
