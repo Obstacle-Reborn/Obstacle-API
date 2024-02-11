@@ -76,10 +76,10 @@ impl QueryRoot {
             "SELECT content, created_at AS last_modified
             FROM resources_content
             ORDER BY created_at DESC
-            LIMIT 1"
+            LIMIT 1",
         )
-            .fetch_one(mysql_pool)
-            .await?;
+        .fetch_one(mysql_pool)
+        .await?;
         Ok(txt)
     }
 
@@ -101,7 +101,7 @@ impl QueryRoot {
         ctx: &async_graphql::Context<'_>,
         mappack_id: String,
     ) -> async_graphql::Result<Mappack> {
-        let res = mappack::calc_scores(ctx, mappack_id).await?;
+        let res = mappack::get_mappack(ctx, mappack_id).await?;
         Ok(res)
     }
 
@@ -405,7 +405,7 @@ impl MutationRoot {
         ctx: &async_graphql::Context<'_>,
         mappack_id: String,
     ) -> async_graphql::Result<Mappack> {
-        self::mappack::calc_scores(ctx, mappack_id)
+        self::mappack::get_mappack(ctx, mappack_id)
             .await
             .map_err(Into::into)
     }

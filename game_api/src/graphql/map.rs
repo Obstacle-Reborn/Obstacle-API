@@ -7,7 +7,11 @@ use async_graphql::{
 use deadpool_redis::redis::AsyncCommands;
 use futures::StreamExt;
 use records_lib::{
-    escaped::Escaped, models::{self, Record}, redis_key::alone_map_key, update_ranks::{get_rank_or_full_update, update_leaderboard}, Database
+    escaped::Escaped,
+    models::{self, Record},
+    redis_key::alone_map_key,
+    update_ranks::{get_rank_or_full_update, update_leaderboard},
+    Database,
 };
 use sqlx::{mysql, FromRow, MySqlPool};
 
@@ -24,7 +28,7 @@ use super::{
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Map {
     #[sqlx(flatten)]
-    inner: models::Map,
+    pub inner: models::Map,
 }
 
 impl From<models::Map> for Map {

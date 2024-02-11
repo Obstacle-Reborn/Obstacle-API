@@ -298,7 +298,7 @@ impl Mappack {
     }
 }
 
-pub async fn calc_scores(
+pub async fn get_mappack(
     ctx: &async_graphql::Context<'_>,
     mappack_id: String,
 ) -> RecordsResult<Mappack> {

@@ -3,7 +3,7 @@ use actix_web::{
     Responder, Scope,
 };
 use itertools::Itertools;
-use records_lib::{models, Database};
+use records_lib::{event, models, Database};
 use serde::Serialize;
 use sqlx::FromRow;
 use tracing_actix_web::RequestId;
@@ -33,28 +33,6 @@ pub fn event_scope() -> Scope {
                 .default_service(web::get().to(event_editions)),
         )
         .default_service(web::get().to(event_list))
-}
-
-pub async fn get_categories_by_edition_id(
-    db: &Database,
-    event_id: u32,
-    edition_id: u32,
-) -> RecordsResult<Vec<models::EventCategory>> {
-    let r = sqlx::query_as(
-        "SELECT DISTINCT ec.* FROM event_edition ee
-        LEFT JOIN event_edition_categories eec ON eec.edition_id = ee.id
-        LEFT JOIN event_categories ecs ON ecs.event_id = ee.event_id
-        INNER JOIN event_category ec ON ec.id IN (eec.category_id, ecs.category_id)
-        WHERE ee.event_id = ? AND ee.id = ?
-        ORDER BY ecs.category_id DESC",
-    )
-    .bind(event_id)
-    .bind(edition_id)
-    .fetch_all(&db.mysql_pool)
-    .await
-    .with_api_err()?;
-
-    Ok(r)
 }
 
 #[derive(FromRow)]
@@ -213,7 +191,7 @@ async fn edition(
         .group_by(|m| m.category_id);
     let maps = maps.into_iter();
 
-    let mut cat = get_categories_by_edition_id(&db, event_id, edition.id)
+    let mut cat = event::get_categories_by_edition_id(&db.mysql_pool, event_id, edition.id)
         .await
         .fit(req_id)?;
 
@@ -270,25 +248,21 @@ async fn edition(
             .with_api_err()
             .fit(req_id)?;
 
-            let (bronze_time, silver_time, gold_time, champion_time) = sqlx::query_as("
-                select bronze.time, silver.time, gold.time, champion.time
-                from event_edition_maps_medals bronze, event_edition_maps_medals silver, event_edition_maps_medals gold, event_edition_maps_medals champion
-                where bronze.event_id = silver.event_id and silver.event_id = gold.event_id and gold.event_id = champion.event_id
-                    and bronze.edition_id = silver.edition_id and silver.edition_id = gold.edition_id and gold.edition_id = champion.edition_id
-                    and bronze.map_id = silver.map_id and silver.map_id = gold.map_id and gold.map_id = champion.map_id
-                    and bronze.medal_id = 1 and silver.medal_id = 2 and gold.medal_id = 3 and champion.medal_id = 4
-                    and bronze.map_id = ? and bronze.event_id = ? and bronze.edition_id = ?")
-            .bind(map.id).bind(event_id).bind(edition_id).fetch_optional(&db.mysql_pool).await.with_api_err().fit(req_id)?.unwrap_or((-1, -1, -1, -1));
+            let medal_times =
+                event::get_medal_times_of(&db.mysql_pool, event_id, edition_id, map.id)
+                    .await
+                    .with_api_err()
+                    .fit(req_id)?;
 
             maps.push(Map {
                 mx_id,
                 main_author,
                 name: map.name,
                 map_uid: map.game_id,
-                bronze_time,
-                silver_time,
-                gold_time,
-                champion_time,
+                bronze_time: medal_times.bronze_time,
+                silver_time: medal_times.silver_time,
+                gold_time: medal_times.gold_time,
+                champion_time: medal_times.champion_time,
                 personal_best,
             });
         }
