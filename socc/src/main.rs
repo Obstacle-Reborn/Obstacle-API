@@ -16,7 +16,7 @@ async fn handle<F, Fut>(
     f: F,
 ) -> anyhow::Result<()>
 where
-    F: Fn(PoolConnection<MySql>, Connection) -> Fut,
+    F: Fn(MySqlPool, PoolConnection<MySql>, Connection) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
     let mut interval = time::interval(period);
@@ -25,7 +25,7 @@ where
         interval.tick().await;
         let mysql_conn = mysql_pool.acquire().await?;
         let redis_conn = redis_pool.get().await?;
-        f(mysql_conn, redis_conn).await?;
+        f(mysql_pool.clone(), mysql_conn, redis_conn).await?;
     }
 }
 
