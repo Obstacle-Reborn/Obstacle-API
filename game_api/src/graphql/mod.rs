@@ -12,7 +12,6 @@ use records_lib::update_ranks::get_rank_or_full_update;
 use records_lib::{must, Database};
 use reqwest::Client;
 use sqlx::{mysql, query_as, FromRow, MySqlPool, Row};
-use std::borrow::Cow;
 use std::env::var;
 use std::vec::Vec;
 use tracing_actix_web::RequestId;
@@ -99,17 +98,7 @@ impl QueryRoot {
         .await?;
 
         Ok(match edition {
-            Some(edition) => {
-                let event = sqlx::query_as("select * from event where id = ?")
-                    .bind(edition.event_id)
-                    .fetch_one(mysql_pool)
-                    .await?;
-
-                Some(EventEdition {
-                    event: Cow::Owned(event),
-                    inner: edition,
-                })
-            }
+            Some(edition) => Some(EventEdition::from_inner(edition, mysql_pool).await?),
             None => None,
         })
     }

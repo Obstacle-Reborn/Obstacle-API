@@ -18,6 +18,7 @@ use sqlx::{mysql, FromRow, MySqlPool};
 use crate::auth::{self, privilege, WebToken};
 
 use super::{
+    event::EventEdition,
     medal::MedalPrice,
     player::{Player, PlayerLoader},
     rating::{PlayerRating, Rating},
@@ -169,6 +170,28 @@ impl Map {
 
     async fn reversed(&self) -> bool {
         self.inner.reversed.unwrap_or(false)
+    }
+
+    async fn related_event_editions(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Vec<EventEdition>> {
+        let mysql_pool = ctx.data_unchecked::<MySqlPool>();
+
+        let mut raw_editions = sqlx::query_as::<_, models::EventEdition>("select ee.* from event_edition ee
+            inner join event_edition_maps eem on ee.id = eem.edition_id and ee.event_id = eem.event_id
+            where eem.map_id = ?
+            order by ee.start_date desc")
+        .bind(self.inner.id)
+        .fetch(mysql_pool);
+
+        let mut out = Vec::with_capacity(raw_editions.size_hint().0);
+
+        while let Some(raw_edition) = raw_editions.next().await {
+            out.push(EventEdition::from_inner(raw_edition?, mysql_pool).await?);
+        }
+
+        Ok(out)
     }
 
     async fn medal_for(

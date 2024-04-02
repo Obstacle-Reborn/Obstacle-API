@@ -13,6 +13,8 @@ use records_lib::{
     RedisPool,
 };
 
+use crate::{RecordsResult, RecordsResultExt};
+
 use super::{map::Map, mappack::Mappack, player::Player, record::RankedRecord, SortState};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -219,6 +221,23 @@ impl Loader<u32> for EventCategoryLoader {
 pub struct EventEdition<'a> {
     pub(super) event: Cow<'a, Event>,
     pub(super) inner: models::EventEdition,
+}
+
+impl EventEdition<'_> {
+    pub(super) async fn from_inner(
+        inner: models::EventEdition,
+        db: &MySqlPool,
+    ) -> RecordsResult<Self> {
+        let event = sqlx::query_as("select * from event where id = ?")
+            .bind(inner.event_id)
+            .fetch_one(db)
+            .await
+            .with_api_err()?;
+        Ok(Self {
+            event: Cow::Owned(event),
+            inner,
+        })
+    }
 }
 
 struct EventEditionPlayer<'a> {
