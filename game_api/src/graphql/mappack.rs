@@ -1,6 +1,7 @@
 use async_graphql::SimpleObject;
 use deadpool_redis::{redis::AsyncCommands, Connection as RedisConnection};
 use records_lib::{
+    models::Medal,
     must, player,
     redis_key::{
         mappack_key, mappack_lb_key, mappack_map_last_rank, mappack_mx_created_key,
@@ -114,7 +115,7 @@ struct MappackMap {
 }
 
 struct MappackPlayer<'a> {
-    mappack_id: &'a str,
+    mappack: &'a Mappack,
     inner: Player,
 }
 
@@ -124,7 +125,10 @@ impl MappackPlayer<'_> {
         let redis_pool = ctx.data_unchecked::<RedisPool>();
         let redis_conn = &mut redis_pool.get().await?;
         let rank = redis_conn
-            .zscore(mappack_lb_key(self.mappack_id), self.inner.inner.id)
+            .zscore(
+                mappack_lb_key(&self.mappack.mappack_id),
+                self.inner.inner.id,
+            )
             .await?;
         Ok(rank)
     }
@@ -145,7 +149,7 @@ impl MappackPlayer<'_> {
 
         let maps_uids: Vec<String> = redis_conn
             .zrange_withscores(
-                mappack_player_ranks_key(self.mappack_id, self.inner.inner.id),
+                mappack_player_ranks_key(&self.mappack.mappack_id, self.inner.inner.id),
                 0,
                 -1,
             )
@@ -160,7 +164,7 @@ impl MappackPlayer<'_> {
             };
             let rank = rank.parse()?;
             let last_rank = redis_conn
-                .get(mappack_map_last_rank(self.mappack_id, game_id))
+                .get(mappack_map_last_rank(&self.mappack.mappack_id, game_id))
                 .await?;
             let map = must::have_map(&mut **mysql_conn, game_id).await?;
 
@@ -179,7 +183,7 @@ impl MappackPlayer<'_> {
         let redis_conn = &mut redis_pool.get().await?;
         let rank = redis_conn
             .get(mappack_player_rank_avg_key(
-                self.mappack_id,
+                &self.mappack.mappack_id,
                 self.inner.inner.id,
             ))
             .await?;
@@ -191,7 +195,7 @@ impl MappackPlayer<'_> {
         let redis_conn = &mut redis_pool.get().await?;
         let map_finished = redis_conn
             .get(mappack_player_map_finished_key(
-                self.mappack_id,
+                &self.mappack.mappack_id,
                 self.inner.inner.id,
             ))
             .await?;
@@ -203,11 +207,19 @@ impl MappackPlayer<'_> {
         let redis_conn = &mut redis_pool.get().await?;
         let worst_rank = redis_conn
             .get(mappack_player_worst_rank_key(
-                self.mappack_id,
+                &self.mappack.mappack_id,
                 self.inner.inner.id,
             ))
             .await?;
         Ok(worst_rank)
+    }
+
+    async fn last_medal(
+        &self,
+        _ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<Medal>> {
+        // TODO: last medal
+        Ok(None)
     }
 }
 
@@ -276,7 +288,7 @@ impl Mappack {
             let player = player::get_player_from_id(&mut **mysql_conn, id).await?;
             out.push(MappackPlayer {
                 inner: player.into(),
-                mappack_id: &self.mappack_id,
+                mappack: self,
             });
         }
 
@@ -293,7 +305,7 @@ impl Mappack {
 
         Ok(MappackPlayer {
             inner: player.into(),
-            mappack_id: &self.mappack_id,
+            mappack: self,
         })
     }
 }

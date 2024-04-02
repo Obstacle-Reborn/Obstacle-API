@@ -88,7 +88,7 @@ async fn insert_record(
     map @ Map { id: map_id, .. }: &Map,
     player_id: u32,
     body: &InsertRecordParams,
-    event: Option<&(models::Event, models::EventEdition)>,
+    event: Option<(&models::Event, &models::EventEdition)>,
 ) -> RecordsResult<u32> {
     let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err()?;
     let redis_conn = &mut db.redis_pool.get().await?;
@@ -119,7 +119,7 @@ pub async fn finished(
     login: String,
     db: &Database,
     Json(body): Json<HasFinishedBody>,
-    event: Option<&(models::Event, models::EventEdition)>,
+    event: Option<(&models::Event, &models::EventEdition)>,
 ) -> RecordsResult<FinishedOutput> {
     // First, we retrieve all what we need to save the record
     let player_id = records_lib::must::have_player(&db.mysql_pool, &login)

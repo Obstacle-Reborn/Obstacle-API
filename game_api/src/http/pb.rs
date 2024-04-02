@@ -41,9 +41,9 @@ pub async fn pb(
     req_id: RequestId,
     db: Data<Database>,
     Query(PbBody { map_uid }): PbReq,
-    event: Option<(models::Event, models::EventEdition)>,
+    event: Option<(&models::Event, &models::EventEdition)>,
 ) -> RecordsResponse<impl Responder> {
-    let (join_event, and_event) = event.as_ref().get_sql_fragments();
+    let (join_event, and_event) = event.get_sql_fragments();
 
     let query = format!(
         "SELECT r.respawn_count AS rs_count, cps.cp_num AS cp_num, cps.time AS time

@@ -233,10 +233,18 @@ async fn finished(
         }
     };
 
-    let res = pf::finished(login, &db, body, event.as_ref())
-        .await
-        .fit(req_id)?
-        .res;
+    let res = pf::finished(
+        login,
+        &db,
+        body,
+        match event {
+            Some((ref event, ref edition)) => Some((event, edition)),
+            None => None,
+        },
+    )
+    .await
+    .fit(req_id)?
+    .res;
     json(res)
 }
 

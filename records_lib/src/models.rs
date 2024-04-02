@@ -138,11 +138,12 @@ pub struct CheckpointTimes {
 
 #[derive(Serialize, PartialEq, Eq, Clone, Copy, Debug, Enum)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum Medal {
-    Bronze,
-    Silver,
-    Gold,
-    Champion,
+    Bronze = 1,
+    Silver = 2,
+    Gold = 3,
+    Champion = 4,
 }
 
 impl<'r> FromRow<'r, MySqlRow> for Medal {
@@ -151,10 +152,10 @@ impl<'r> FromRow<'r, MySqlRow> for Medal {
         let medal_name: String = row.try_get("medal_name")?;
 
         match (id, &*medal_name) {
-            (0, "bronze") => Ok(Self::Bronze),
-            (1, "silver") => Ok(Self::Silver),
-            (2, "gold") => Ok(Self::Gold),
-            (3, "champion") => Ok(Self::Champion),
+            (1, "bronze") => Ok(Self::Bronze),
+            (2, "silver") => Ok(Self::Silver),
+            (3, "gold") => Ok(Self::Gold),
+            (4, "champion") => Ok(Self::Champion),
             (id, _) => Err(sqlx::Error::ColumnDecode {
                 index: "id".to_owned(),
                 source: format!("unknown medal `{id}`, `{medal_name}`").into(),
@@ -239,6 +240,7 @@ pub struct EventCategory {
     pub handle: String,
     pub name: String,
     pub banner_img_url: Option<String>,
+    pub hex_color: Option<String>,
 }
 
 #[derive(Serialize, FromRow, Clone, Debug)]

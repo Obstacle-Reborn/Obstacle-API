@@ -153,7 +153,10 @@ impl fmt::Display for MapKey<'_> {
     }
 }
 
-pub fn map_key(map_id: u32, event: Option<&(models::Event, models::EventEdition)>) -> MapKey<'_> {
+pub fn map_key<'a>(
+    map_id: u32,
+    event: Option<(&'a models::Event, &'a models::EventEdition)>,
+) -> MapKey<'a> {
     match event {
         Some((event, edition)) => MapKey::Evented(event_map_key(map_id, &event.handle, edition.id)),
         None => MapKey::Alone(alone_map_key(map_id)),

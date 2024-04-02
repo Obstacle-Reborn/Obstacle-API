@@ -12,6 +12,7 @@ use records_lib::update_ranks::get_rank_or_full_update;
 use records_lib::{must, Database};
 use reqwest::Client;
 use sqlx::{mysql, query_as, FromRow, MySqlPool, Row};
+use std::borrow::Cow;
 use std::env::var;
 use std::vec::Vec;
 use tracing_actix_web::RequestId;
@@ -89,11 +90,28 @@ impl QueryRoot {
         mx_id: i64,
     ) -> async_graphql::Result<Option<EventEdition>> {
         let mysql_pool = ctx.data_unchecked::<MySqlPool>();
-        let res = sqlx::query_as("SELECT * FROM event_edition WHERE mx_id = ?")
-            .bind(mx_id)
-            .fetch_optional(mysql_pool)
-            .await?;
-        Ok(res)
+
+        let edition = sqlx::query_as::<_, models::EventEdition>(
+            "SELECT * FROM event_edition WHERE mx_id = ?",
+        )
+        .bind(mx_id)
+        .fetch_optional(mysql_pool)
+        .await?;
+
+        Ok(match edition {
+            Some(edition) => {
+                let event = sqlx::query_as("select * from event where id = ?")
+                    .bind(edition.event_id)
+                    .fetch_one(mysql_pool)
+                    .await?;
+
+                Some(EventEdition {
+                    event: Cow::Owned(event),
+                    inner: edition,
+                })
+            }
+            None => None,
+        })
     }
 
     async fn mappack(

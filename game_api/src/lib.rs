@@ -39,9 +39,15 @@ pub struct AccessTokenErr {
 #[derive(Error, Debug)]
 #[repr(i32)] // i32 to be used with clients that don't support unsigned integers
 pub enum RecordsErrorKind {
-    // Internal server errors
+    // Caution: when creating a new error, you must ensure its code isn't
+    // in conflict with another one in `records_lib::RecordsError`.
+
+    // --- Internal server errors
     #[error(transparent)]
     IOError(#[from] io::Error) = 101,
+
+    // ...Errors from records_lib
+
     #[error(transparent)]
     ExternalRequest(#[from] reqwest::Error) = 104,
     #[error("unknown error: {0}")]
@@ -51,7 +57,7 @@ pub enum RecordsErrorKind {
     #[error("unknown api status: `{0}` named `{1}`")]
     UnknownStatus(u8, String) = 107,
 
-    // Authentication errors
+    // --- Authentication errors
     #[error("unauthorized")]
     Unauthorized = 201,
     #[error("forbidden")]
@@ -69,11 +75,17 @@ pub enum RecordsErrorKind {
     #[error("timeout exceeded (max 5 minutes)")]
     Timeout = 208,
 
-    // Logical errors
+    // --- Logical errors
     #[error("not found")]
     EndpointNotFound = 301,
+
+    // ...Error from records_lib
+
     #[error("player not banned: `{0}`")]
     PlayerNotBanned(String) = 303,
+
+    // ...Error from records_lib
+
     #[error("unknown role with id `{0}` and name `{1}`")]
     UnknownRole(u8, String) = 305,
     #[error("unknown medal with id `{0}` and name `{1}`")]
@@ -84,6 +96,9 @@ pub enum RecordsErrorKind {
     NoRatingFound(String, String) = 308,
     #[error("invalid rates (too many, or repeated rate)")]
     InvalidRates = 309,
+
+    // ...Errors from records_lib
+
     #[error("invalid times")]
     InvalidTimes = 313,
     #[error("map pack id should be an integer, got `{0}`")]
@@ -91,6 +106,15 @@ pub enum RecordsErrorKind {
 
     #[error(transparent)]
     Lib(#[from] records_lib::error::RecordsError),
+}
+
+impl RecordsErrorKind {
+    pub fn get_type(&self) -> i32 {
+        match self {
+            Self::Lib(err) => err.get_code(),
+            other => unsafe { *(other as *const Self as *const _) },
+        }
+    }
 }
 
 /// Converts a `Result<T, E>` in which `E` is convertible to [`records_lib::error::RecordsError`]
@@ -128,8 +152,9 @@ pub struct RecordsError {
 }
 
 impl fmt::Display for RecordsError {
+    #[inline(always)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} --- request id: {}", self.kind, self.request_id)
+        fmt::Display::fmt(&self.kind, f)
     }
 }
 
@@ -144,7 +169,7 @@ impl RecordsError {
         let message = self.to_string();
         ErrorResponse {
             request_id: self.request_id.to_string(),
-            r#type: unsafe { *(&self.kind as *const RecordsErrorKind as *const _) },
+            r#type: self.kind.get_type(),
             message,
         }
     }

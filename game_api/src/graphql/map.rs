@@ -11,7 +11,7 @@ use records_lib::{
     models::{self, Record},
     redis_key::alone_map_key,
     update_ranks::{get_rank_or_full_update, update_leaderboard},
-    Database,
+    Database, GetSqlFragments as _,
 };
 use sqlx::{mysql, FromRow, MySqlPool};
 
@@ -34,6 +34,107 @@ pub struct Map {
 impl From<models::Map> for Map {
     fn from(inner: models::Map) -> Self {
         Self { inner }
+    }
+}
+
+impl Map {
+    pub(super) async fn get_records(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        rank_sort_by: Option<SortState>,
+        date_sort_by: Option<SortState>,
+        event: Option<(&models::Event, &models::EventEdition)>,
+    ) -> async_graphql::Result<Vec<RankedRecord>> {
+        let db = ctx.data_unchecked::<Database>();
+        let mysql_conn = &mut db.mysql_pool.acquire().await?;
+        let redis_conn = &mut db.redis_pool.get().await?;
+
+        let key = alone_map_key(self.inner.id);
+        let reversed = self.inner.reversed.unwrap_or(false);
+
+        update_leaderboard((mysql_conn, redis_conn), &self.inner, None).await?;
+
+        let to_reverse = reversed
+            ^ rank_sort_by
+                .as_ref()
+                .filter(|s| **s == SortState::Reverse)
+                .is_some();
+        let record_ids: Vec<i32> = if to_reverse {
+            redis_conn.zrevrange(&key, 0, 99)
+        } else {
+            redis_conn.zrange(&key, 0, 99)
+        }
+        .await?;
+        if record_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let player_ids_query = record_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+        let (and_player_id_in, order_by_clause) = if let Some(s) = date_sort_by.as_ref() {
+            let date_sort_by = if *s == SortState::Reverse {
+                "ASC".to_owned()
+            } else {
+                "DESC".to_owned()
+            };
+            (String::new(), format!("r.record_date {date_sort_by}"))
+        } else {
+            (
+                format!("AND r.record_player_id IN ({player_ids_query})"),
+                format!(
+                    "r.time {order}, r.record_date ASC",
+                    order = if to_reverse { "DESC" } else { "ASC" }
+                ),
+            )
+        };
+
+        let (join_event, and_event) = event.get_sql_fragments();
+
+        // Query the records with these ids
+        let query = format!(
+            "SELECT * FROM global_records r
+            {join_event}
+            WHERE map_id = ? {and_player_id_in}
+            {and_event}
+            ORDER BY {order_by_clause}
+            {limit}",
+            limit = if date_sort_by.is_some() || rank_sort_by.is_some() {
+                "LIMIT 100"
+            } else {
+                ""
+            }
+        );
+
+        let mut query = sqlx::query_as::<_, Record>(&query).bind(self.inner.id);
+        if date_sort_by.is_none() {
+            for id in &record_ids {
+                query = query.bind(id);
+            }
+        }
+
+        if let Some((event, edition)) = event {
+            query = query.bind(event.id).bind(edition.id);
+        }
+
+        let mut records = query.fetch(&mut **mysql_conn);
+        let mut ranked_records = Vec::with_capacity(records.size_hint().0);
+
+        let mysql_conn = &mut db.mysql_pool.acquire().await?;
+
+        while let Some(record) = records.next().await {
+            let record = record?;
+            let rank = get_rank_or_full_update(
+                (&mut *mysql_conn, redis_conn),
+                &self.inner,
+                record.time,
+                None,
+            )
+            .await?;
+
+            ranked_records.push(models::RankedRecord { rank, record }.into());
+        }
+
+        Ok(ranked_records)
     }
 }
 
@@ -147,94 +248,15 @@ impl Map {
         Ok(fetch_all)
     }
 
+    #[inline(always)]
     async fn records(
         &self,
         ctx: &async_graphql::Context<'_>,
         rank_sort_by: Option<SortState>,
         date_sort_by: Option<SortState>,
     ) -> async_graphql::Result<Vec<RankedRecord>> {
-        let db = ctx.data_unchecked::<Database>();
-        let mysql_conn = &mut db.mysql_pool.acquire().await?;
-        let redis_conn = &mut db.redis_pool.get().await?;
-
-        let key = alone_map_key(self.inner.id);
-        let reversed = self.inner.reversed.unwrap_or(false);
-
-        update_leaderboard((mysql_conn, redis_conn), &self.inner, None).await?;
-
-        let to_reverse = reversed
-            ^ rank_sort_by
-                .as_ref()
-                .filter(|s| **s == SortState::Reverse)
-                .is_some();
-        let record_ids: Vec<i32> = if to_reverse {
-            redis_conn.zrevrange(&key, 0, 99)
-        } else {
-            redis_conn.zrange(&key, 0, 99)
-        }
-        .await?;
-        if record_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let player_ids_query = record_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-
-        let (and_player_id_in, order_by_clause) = if let Some(s) = date_sort_by.as_ref() {
-            let date_sort_by = if *s == SortState::Reverse {
-                "ASC".to_owned()
-            } else {
-                "DESC".to_owned()
-            };
-            (String::new(), format!("r.record_date {date_sort_by}"))
-        } else {
-            (
-                format!("AND r.record_player_id IN ({player_ids_query})"),
-                format!(
-                    "r.time {order}, r.record_date ASC",
-                    order = if to_reverse { "DESC" } else { "ASC" }
-                ),
-            )
-        };
-
-        // Query the records with these ids
-        let query = format!(
-            "SELECT * FROM global_records r
-            WHERE map_id = ? {and_player_id_in}
-            ORDER BY {order_by_clause}
-            {limit}",
-            limit = if date_sort_by.is_some() || rank_sort_by.is_some() {
-                "LIMIT 100"
-            } else {
-                ""
-            }
-        );
-
-        let mut query = sqlx::query_as::<_, Record>(&query).bind(self.inner.id);
-        if date_sort_by.is_none() {
-            for id in &record_ids {
-                query = query.bind(id);
-            }
-        }
-
-        let mut records = query.fetch(&mut **mysql_conn);
-        let mut ranked_records = Vec::with_capacity(records.size_hint().0);
-
-        let mysql_conn = &mut db.mysql_pool.acquire().await?;
-
-        while let Some(record) = records.next().await {
-            let record = record?;
-            let rank = get_rank_or_full_update(
-                (&mut *mysql_conn, redis_conn),
-                &self.inner,
-                record.time,
-                None,
-            )
-            .await?;
-
-            ranked_records.push(models::RankedRecord { rank, record }.into());
-        }
-
-        Ok(ranked_records)
+        self.get_records(ctx, rank_sort_by, date_sort_by, None)
+            .await
     }
 }
 

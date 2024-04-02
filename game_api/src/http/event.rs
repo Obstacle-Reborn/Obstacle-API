@@ -65,12 +65,6 @@ async fn get_maps_by_edition_id(
 }
 
 #[derive(Serialize, FromRow)]
-pub struct EventResponse {
-    handle: String,
-    last_edition_id: i64,
-}
-
-#[derive(Serialize, FromRow)]
 struct EventHandleResponse {
     id: u32,
     name: String,
@@ -118,19 +112,10 @@ struct EventHandleEditionResponse {
 }
 
 async fn event_list(req_id: RequestId, db: Data<Database>) -> RecordsResponse<impl Responder> {
-    let out = sqlx::query_as::<_, EventResponse>(
-        "WITH handles AS (SELECT ev.handle AS handle, MAX(ed.id) AS last_id
-        FROM event ev
-        LEFT JOIN event_edition ed ON ed.event_id = ev.id
-        GROUP BY ev.id, ev.handle
-        ORDER BY ev.id DESC)
-        SELECT handle, CAST(IF(last_id IS NULL, -1, last_id) AS INT) AS last_edition_id
-        FROM handles",
-    )
-    .fetch_all(&db.mysql_pool)
-    .await
-    .with_api_err()
-    .fit(req_id)?;
+    let out = event::event_list(&db.mysql_pool)
+        .await
+        .with_api_err()
+        .fit(req_id)?;
 
     json(out)
 }
@@ -149,13 +134,18 @@ async fn event_editions(
         .fit(req_id)?
         .id;
 
-    let res: Vec<EventHandleResponse> =
-        sqlx::query_as("SELECT * FROM event_edition WHERE event_id = ? ORDER BY id DESC")
-            .bind(id)
-            .fetch_all(&mut **mysql_conn)
-            .await
-            .with_api_err()
-            .fit(req_id)?;
+    let res: Vec<EventHandleResponse> = sqlx::query_as(
+        "select ee.* from event_edition ee
+        where ee.event_id = ?
+            and (ee.event_id, ee.id) in (
+            select eem.event_id, eem.edition_id from event_edition_maps eem
+        ) order by ee.id desc",
+    )
+    .bind(id)
+    .fetch_all(&mut **mysql_conn)
+    .await
+    .with_api_err()
+    .fit(req_id)?;
 
     json(res)
 }
@@ -191,7 +181,8 @@ async fn edition(
         .group_by(|m| m.category_id);
     let maps = maps.into_iter();
 
-    let mut cat = event::get_categories_by_edition_id(&db.mysql_pool, event_id, edition.id)
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
+    let mut cat = event::get_categories_by_edition_id(mysql_conn, event_id, edition.id)
         .await
         .fit(req_id)?;
 
@@ -218,8 +209,8 @@ async fn edition(
                     .with_api_err()
                     .fit(req_id)?;
 
-                let personal_best = sqlx::query_scalar(
-                    "select time from global_records r
+                let personal_best: Option<_> = sqlx::query_scalar(
+                    "select min(time) from records r
                     inner join players p on p.id = r.record_player_id
                     inner join event_edition_records eer on eer.record_id = r.record_id
                         and eer.event_id = ? and eer.edition_id = ?
@@ -229,11 +220,11 @@ async fn edition(
                 .bind(edition_id)
                 .bind(login)
                 .bind(map.id)
-                .fetch_optional(&db.mysql_pool)
+                .fetch_one(&db.mysql_pool)
                 .await
                 .with_api_err()
-                .fit(req_id)?
-                .unwrap_or(-1);
+                .fit(req_id)?;
+                let personal_best = personal_best.unwrap_or(-1);
 
                 Ok(AuthorWithPlayerTime {
                     main_author,
@@ -317,7 +308,7 @@ async fn edition_finished(
 
     // We first check that the event and its edition exist
     // and that the map is registered on it.
-    let event = records_lib::must::have_event_edition_with_map(
+    let (event, edition) = records_lib::must::have_event_edition_with_map(
         mysql_conn,
         &body.map_uid,
         event_handle,
@@ -327,14 +318,13 @@ async fn edition_finished(
     .fit(req_id)?;
 
     // Then we insert the record for the global records
-    let res = pf::finished(login, &db, body, Some(&event))
+    let res = pf::finished(login, &db, body, Some((&event, &edition)))
         .await
         .fit(req_id)?;
 
     // Then we insert it for the event edition records.
-    // This is not part of the transaction, because we don't want to rollback
+    // This is not part of the transaction, because we don't want to roll back
     // the insertion of the record if this query fails.
-    let (event, edition) = event;
     sqlx::query(
         "INSERT INTO event_edition_records (record_id, event_id, edition_id)
             VALUES (?, ?, ?)",
@@ -361,7 +351,7 @@ async fn edition_pb(
 
     let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
 
-    let event = records_lib::must::have_event_edition_with_map(
+    let (event, edition) = records_lib::must::have_event_edition_with_map(
         mysql_conn,
         &body.map_uid,
         event_handle,
@@ -369,5 +359,6 @@ async fn edition_pb(
     )
     .await
     .fit(req_id)?;
-    pb::pb(login, req_id, db, body, Some(event)).await
+
+    pb::pb(login, req_id, db, body, Some((&event, &edition))).await
 }

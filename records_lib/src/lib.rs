@@ -31,7 +31,7 @@ fn get_sql_fragments() -> (&'static str, &'static str) {
     )
 }
 
-impl GetSqlFragments for Option<&(models::Event, models::EventEdition)> {
+impl GetSqlFragments for Option<(&models::Event, &models::EventEdition)> {
     fn get_sql_fragments(self) -> (&'static str, &'static str) {
         self.is_some().then(get_sql_fragments).unwrap_or_default()
     }

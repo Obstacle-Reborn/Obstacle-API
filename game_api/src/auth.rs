@@ -50,7 +50,6 @@
 
 use std::future::{ready, Ready};
 use std::pin::Pin;
-use std::sync::OnceLock;
 use std::{collections::HashMap, time::Duration};
 
 use actix_web::dev::Payload;
@@ -59,6 +58,7 @@ use actix_web::{FromRequest, HttpRequest};
 use chrono::{DateTime, Utc};
 use deadpool_redis::redis::{AsyncCommands, ToRedisArgs};
 use futures::Future;
+use once_cell::sync::Lazy;
 use records_lib::models::ApiStatusKind;
 use records_lib::redis_key::{mp_token_key, web_token_key};
 use records_lib::{get_env_var_as, Database};
@@ -83,11 +83,11 @@ pub mod privilege {
     pub const ADMIN: Flags = 0b1111;
 }
 
-static EXPIRES_IN: OnceLock<u32> = OnceLock::new();
+static EXPIRES_IN: Lazy<u32> = Lazy::new(|| get_env_var_as("RECORDS_API_TOKEN_TTL"));
 
 /// Returns the time-to-live of all the generated Obstacle tokens.
 pub fn get_tokens_ttl() -> u32 {
-    *EXPIRES_IN.get_or_init(|| get_env_var_as("RECORDS_API_TOKEN_TTL"))
+    *EXPIRES_IN
 }
 
 pub const WEB_TOKEN_SESS_KEY: &str = "__obs_web_token";

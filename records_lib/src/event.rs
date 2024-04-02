@@ -1,6 +1,78 @@
 use sqlx::MySqlConnection;
 
-use crate::{error::RecordsResult, models};
+use crate::{error::RecordsResult, models, MySqlPool};
+
+#[derive(serde::Serialize)]
+pub struct EventListItem {
+    pub handle: String,
+    pub last_edition_id: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct RawSqlEventListItem {
+    handle: String,
+    last_edition_id: u32,
+}
+
+impl From<RawSqlEventListItem> for EventListItem {
+    fn from(value: RawSqlEventListItem) -> Self {
+        Self {
+            handle: value.handle,
+            last_edition_id: value.last_edition_id as _,
+        }
+    }
+}
+
+pub async fn event_list(db: &MySqlPool) -> RecordsResult<Vec<EventListItem>> {
+    sqlx::query_as::<_, RawSqlEventListItem>(
+        "select ev.handle as handle, max(ee.id) as last_edition_id from event ev
+        inner join event_edition ee on ev.id = ee.event_id
+        inner join event_edition_maps eem on ee.id = eem.edition_id and ee.event_id = eem.event_id
+        group by ev.id, ev.handle
+        order by ev.id",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(From::from)
+    .map(|e| e.into_iter().map(From::from).collect())
+}
+
+pub async fn event_editions_list(
+    db: &MySqlPool,
+    event_handle: &str,
+) -> RecordsResult<Vec<models::EventEdition>> {
+    let res = sqlx::query_as(
+        "select ee.* from event_edition ee
+        inner join event e on ee.event_id = e.id
+        where e.handle = ?",
+    )
+    .bind(event_handle)
+    .fetch_all(db)
+    .await?;
+    Ok(res)
+}
+
+pub async fn event_edition_maps(
+    db: &MySqlPool,
+    event_id: u32,
+    edition_id: u32,
+) -> RecordsResult<Vec<models::Map>> {
+    sqlx::query_as(
+        "select m.* from maps m
+        inner join event_edition_maps eem on m.id = eem.map_id
+        where eem.event_id = ? and eem.edition_id = ?",
+    )
+    .bind(event_id)
+    .bind(edition_id)
+    .fetch_all(db)
+    .await
+    .map_err(From::from)
+}
+
+#[inline(always)]
+pub fn event_edition_key(event_id: u32, edition_id: u32) -> String {
+    format!("__{event_id}__{edition_id}__")
+}
 
 pub async fn get_event_by_handle(
     db: &mut MySqlConnection,
@@ -26,18 +98,16 @@ pub async fn get_edition_by_id(
     Ok(r)
 }
 
-pub async fn get_categories_by_edition_id<E: for<'c> sqlx::Executor<'c, Database = sqlx::MySql>>(
-    db: E,
+pub async fn get_categories_by_edition_id(
+    db: &mut MySqlConnection,
     event_id: u32,
     edition_id: u32,
 ) -> RecordsResult<Vec<models::EventCategory>> {
     let r = sqlx::query_as(
-        "SELECT DISTINCT ec.* FROM event_edition ee
-        LEFT JOIN event_edition_categories eec ON eec.edition_id = ee.id
-        LEFT JOIN event_categories ecs ON ecs.event_id = ee.event_id
-        INNER JOIN event_category ec ON ec.id IN (eec.category_id, ecs.category_id)
-        WHERE ee.event_id = ? AND ee.id = ?
-        ORDER BY ecs.category_id DESC",
+        "select ec.* from event_category ec
+        inner join event_edition_categories eec on ec.id = eec.category_id
+        where eec.event_id = ? and eec.edition_id = ?
+        order by ec.id asc",
     )
     .bind(event_id)
     .bind(edition_id)

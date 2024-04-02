@@ -53,7 +53,7 @@ async fn get_range(
         ..
     }: &Map,
     (start, end): (u32, u32),
-    event: Option<&(models::Event, models::EventEdition)>,
+    event: Option<(&models::Event, &models::EventEdition)>,
 ) -> RecordsResult<Vec<RankedRecord>> {
     let reversed = reversed.unwrap_or(false);
     let key = map_key(*map_id, event);
@@ -173,9 +173,14 @@ pub async fn overview(
         None => None,
     };
 
+    let event = match event {
+        Some((ref event, ref edition)) => Some((event, edition)),
+        None => None,
+    };
+
     // Update redis if needed
-    let key = map_key(map_id, event.as_ref());
-    let count = update_leaderboard((mysql_conn, redis_conn), map, event.as_ref())
+    let key = map_key(map_id, event);
+    let count = update_leaderboard((mysql_conn, redis_conn), map, event)
         .await
         .fit(req_id)? as u32;
 
@@ -198,21 +203,15 @@ pub async fn overview(
     if let Some(player_rank) = player_rank {
         // The player has a record and is in top ROWS, display ROWS records
         if player_rank < TOTAL_ROWS {
-            let range = get_range(
-                &db,
-                (mysql_conn, redis_conn),
-                map,
-                (0, TOTAL_ROWS),
-                event.as_ref(),
-            )
-            .await
-            .fit(req_id)?;
+            let range = get_range(&db, (mysql_conn, redis_conn), map, (0, TOTAL_ROWS), event)
+                .await
+                .fit(req_id)?;
             ranked_records.extend(range);
         }
         // The player is not in the top ROWS records, display top3 and then center around the player rank
         else {
             // push top3
-            let range = get_range(&db, (mysql_conn, redis_conn), map, (0, 3), event.as_ref())
+            let range = get_range(&db, (mysql_conn, redis_conn), map, (0, 3), event)
                 .await
                 .fit(req_id)?;
             ranked_records.extend(range);
@@ -229,7 +228,7 @@ pub async fn overview(
                 }
             };
 
-            let range = get_range(&db, (mysql_conn, redis_conn), map, range, event.as_ref())
+            let range = get_range(&db, (mysql_conn, redis_conn), map, range, event)
                 .await
                 .fit(req_id)?;
             ranked_records.extend(range);
@@ -246,7 +245,7 @@ pub async fn overview(
                 (mysql_conn, redis_conn),
                 map,
                 (0, NO_RECORD_ROWS - 3),
-                event.as_ref(),
+                event,
             )
             .await
             .fit(req_id)?;
@@ -258,7 +257,7 @@ pub async fn overview(
                 (mysql_conn, redis_conn),
                 map,
                 (count - 3, count),
-                event.as_ref(),
+                event,
             )
             .await
             .fit(req_id)?;
@@ -271,7 +270,7 @@ pub async fn overview(
                 (mysql_conn, redis_conn),
                 map,
                 (0, NO_RECORD_ROWS),
-                event.as_ref(),
+                event,
             )
             .await
             .fit(req_id)?;

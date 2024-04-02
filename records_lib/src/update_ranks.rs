@@ -37,7 +37,7 @@ pub async fn update_leaderboard(
         reversed,
         ..
     }: &models::Map,
-    event: Option<&(models::Event, models::EventEdition)>,
+    event: Option<(&models::Event, &models::EventEdition)>,
 ) -> RecordsResult<i64> {
     let reversed_lb = reversed.unwrap_or(false);
     let key = map_key(*map_id, event);
@@ -90,7 +90,7 @@ pub async fn get_rank_or_full_update(
         ..
     }: &models::Map,
     time: i32,
-    event: Option<&(models::Event, models::EventEdition)>,
+    event: Option<(&models::Event, &models::EventEdition)>,
 ) -> RecordsResult<i32> {
     async fn get_rank(
         redis_conn: &mut RedisConnection,
