@@ -26,7 +26,7 @@ async fn event_mappacks(
             let editions = stream::iter(editions)
                 // Event editions bound with an MX ID will update their scores with
                 // the regular process
-                .filter(|edition| future::ready(edition.mx_id.is_some()))
+                .filter(|edition| future::ready(edition.mx_id.is_none()))
                 .map(|edition| async move {
                     event::event_edition_maps(mysql_pool, edition.event_id, edition.id)
                         .await
