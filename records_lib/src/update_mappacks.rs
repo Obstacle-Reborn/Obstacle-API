@@ -326,7 +326,7 @@ async fn calc_scores(
     for (map_idx, map) in maps.iter_mut().enumerate() {
         let records = map.records.take().unwrap();
 
-        let last_rank = records.iter().map(|p| p.rank).max().unwrap_or(99);
+        let last_rank = records.iter().map(|p| p.rank).max().unwrap_or(1);
 
         for record in records {
             let player = scores
