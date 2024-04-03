@@ -119,18 +119,62 @@ struct MappackPlayer<'a> {
     inner: Player,
 }
 
+pub(super) async fn player_rank(
+    ctx: &async_graphql::Context<'_>,
+    mappack_id: &str,
+    player_id: u32,
+) -> async_graphql::Result<usize> {
+    let redis_pool = ctx.data_unchecked::<RedisPool>();
+    let redis_conn = &mut redis_pool.get().await?;
+    let rank = redis_conn
+        .zscore(mappack_lb_key(mappack_id), player_id)
+        .await?;
+    Ok(rank)
+}
+
+pub(super) async fn player_rank_avg(
+    ctx: &async_graphql::Context<'_>,
+    mappack_id: &str,
+    player_id: u32,
+) -> async_graphql::Result<f64> {
+    let redis_pool = ctx.data_unchecked::<RedisPool>();
+    let redis_conn = &mut redis_pool.get().await?;
+    let rank = redis_conn
+        .get(mappack_player_rank_avg_key(mappack_id, player_id))
+        .await?;
+    Ok(rank)
+}
+
+pub(super) async fn player_map_finished(
+    ctx: &async_graphql::Context<'_>,
+    mappack_id: &str,
+    player_id: u32,
+) -> async_graphql::Result<usize> {
+    let redis_pool = ctx.data_unchecked::<RedisPool>();
+    let redis_conn = &mut redis_pool.get().await?;
+    let map_finished = redis_conn
+        .get(mappack_player_map_finished_key(mappack_id, player_id))
+        .await?;
+    Ok(map_finished)
+}
+
+pub(super) async fn player_worst_rank(
+    ctx: &async_graphql::Context<'_>,
+    mappack_id: &str,
+    player_id: u32,
+) -> async_graphql::Result<i32> {
+    let redis_pool = ctx.data_unchecked::<RedisPool>();
+    let redis_conn = &mut redis_pool.get().await?;
+    let worst_rank = redis_conn
+        .get(mappack_player_worst_rank_key(mappack_id, player_id))
+        .await?;
+    Ok(worst_rank)
+}
+
 #[async_graphql::Object]
 impl MappackPlayer<'_> {
     async fn rank(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<usize> {
-        let redis_pool = ctx.data_unchecked::<RedisPool>();
-        let redis_conn = &mut redis_pool.get().await?;
-        let rank = redis_conn
-            .zscore(
-                mappack_lb_key(&self.mappack.mappack_id),
-                self.inner.inner.id,
-            )
-            .await?;
-        Ok(rank)
+        player_rank(ctx, &self.mappack.mappack_id, self.inner.inner.id).await
     }
 
     async fn player(&self) -> &Player {
@@ -179,39 +223,15 @@ impl MappackPlayer<'_> {
     }
 
     async fn rank_avg(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<f64> {
-        let redis_pool = ctx.data_unchecked::<RedisPool>();
-        let redis_conn = &mut redis_pool.get().await?;
-        let rank = redis_conn
-            .get(mappack_player_rank_avg_key(
-                &self.mappack.mappack_id,
-                self.inner.inner.id,
-            ))
-            .await?;
-        Ok(rank)
+        player_rank_avg(ctx, &self.mappack.mappack_id, self.inner.inner.id).await
     }
 
     async fn map_finished(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<usize> {
-        let redis_pool = ctx.data_unchecked::<RedisPool>();
-        let redis_conn = &mut redis_pool.get().await?;
-        let map_finished = redis_conn
-            .get(mappack_player_map_finished_key(
-                &self.mappack.mappack_id,
-                self.inner.inner.id,
-            ))
-            .await?;
-        Ok(map_finished)
+        player_map_finished(ctx, &self.mappack.mappack_id, self.inner.inner.id).await
     }
 
     async fn worst_rank(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<i32> {
-        let redis_pool = ctx.data_unchecked::<RedisPool>();
-        let redis_conn = &mut redis_pool.get().await?;
-        let worst_rank = redis_conn
-            .get(mappack_player_worst_rank_key(
-                &self.mappack.mappack_id,
-                self.inner.inner.id,
-            ))
-            .await?;
-        Ok(worst_rank)
+        player_worst_rank(ctx, &self.mappack.mappack_id, self.inner.inner.id).await
     }
 
     async fn last_medal(

@@ -6,7 +6,7 @@ use sqlx::{mysql, FromRow, MySqlPool, Row};
 
 use records_lib::{
     escaped::Escaped,
-    event::{self, MedalTimes},
+    event::{self, event_edition_key, MedalTimes},
     models::{self, EventCategory},
     must,
     redis_key::{mappack_map_last_rank, mappack_player_ranks_key},
@@ -15,7 +15,13 @@ use records_lib::{
 
 use crate::{RecordsResult, RecordsResultExt};
 
-use super::{map::Map, mappack::Mappack, player::Player, record::RankedRecord, SortState};
+use super::{
+    map::Map,
+    mappack::{self, Mappack},
+    player::Player,
+    record::RankedRecord,
+    SortState,
+};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Event {
@@ -432,6 +438,42 @@ impl EventEditionPlayerCategorizedRank<'_> {
 impl EventEditionPlayer<'_> {
     async fn player(&self) -> Player {
         self.player.clone().into()
+    }
+
+    async fn rank(&self, ctx: &Context<'_>) -> async_graphql::Result<usize> {
+        mappack::player_rank(
+            ctx,
+            &event_edition_key(self.edition.event.inner.id, self.edition.inner.id),
+            self.player.id,
+        )
+        .await
+    }
+
+    async fn rank_avg(&self, ctx: &Context<'_>) -> async_graphql::Result<f64> {
+        mappack::player_rank_avg(
+            ctx,
+            &event_edition_key(self.edition.event.inner.id, self.edition.inner.id),
+            self.player.id,
+        )
+        .await
+    }
+
+    async fn map_finished(&self, ctx: &Context<'_>) -> async_graphql::Result<usize> {
+        mappack::player_map_finished(
+            ctx,
+            &event_edition_key(self.edition.event.inner.id, self.edition.inner.id),
+            self.player.id,
+        )
+        .await
+    }
+
+    async fn worst_rank(&self, ctx: &Context<'_>) -> async_graphql::Result<i32> {
+        mappack::player_worst_rank(
+            ctx,
+            &event_edition_key(self.edition.event.inner.id, self.edition.inner.id),
+            self.player.id,
+        )
+        .await
     }
 
     async fn categorized_ranks(
