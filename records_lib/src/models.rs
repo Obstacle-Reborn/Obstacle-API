@@ -248,8 +248,10 @@ pub struct EventEdition {
     pub id: u32,
     pub event_id: u32,
     pub name: String,
+    pub subtitle: Option<String>,
     pub start_date: chrono::NaiveDateTime,
     pub banner_img_url: Option<String>,
+    pub banner2_img_url: Option<String>,
     pub mx_id: Option<i32>,
 }
 

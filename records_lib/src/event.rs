@@ -1,6 +1,6 @@
 use sqlx::MySqlConnection;
 
-use crate::{error::RecordsResult, models, MySqlPool};
+use crate::{error::RecordsResult, models};
 
 #[derive(serde::Serialize)]
 pub struct EventListItem {
@@ -23,7 +23,7 @@ impl From<RawSqlEventListItem> for EventListItem {
     }
 }
 
-pub async fn event_list(db: &MySqlPool) -> RecordsResult<Vec<EventListItem>> {
+pub async fn event_list(db: &mut MySqlConnection) -> RecordsResult<Vec<EventListItem>> {
     sqlx::query_as::<_, RawSqlEventListItem>(
         "select ev.handle as handle, max(ee.id) as last_edition_id from event ev
         inner join event_edition ee on ev.id = ee.event_id
@@ -38,7 +38,7 @@ pub async fn event_list(db: &MySqlPool) -> RecordsResult<Vec<EventListItem>> {
 }
 
 pub async fn event_editions_list(
-    db: &MySqlPool,
+    db: &mut MySqlConnection,
     event_handle: &str,
 ) -> RecordsResult<Vec<models::EventEdition>> {
     let res = sqlx::query_as(
@@ -53,7 +53,7 @@ pub async fn event_editions_list(
 }
 
 pub async fn event_edition_maps(
-    db: &MySqlPool,
+    db: &mut MySqlConnection,
     event_id: u32,
     edition_id: u32,
 ) -> RecordsResult<Vec<models::Map>> {

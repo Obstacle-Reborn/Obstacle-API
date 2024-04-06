@@ -65,10 +65,19 @@ async fn get_maps_by_edition_id(
 }
 
 #[derive(Serialize, FromRow)]
-struct EventHandleResponse {
+struct RawEventHandleResponse {
     id: u32,
     name: String,
+    #[serde(skip)]
+    subtitle: Option<String>,
     start_date: chrono::NaiveDateTime,
+}
+
+#[derive(Serialize)]
+struct EventHandleResponse {
+    subtitle: String,
+    #[serde(flatten)]
+    raw: RawEventHandleResponse,
 }
 
 #[derive(Serialize)]
@@ -105,14 +114,18 @@ impl From<Vec<Map>> for Category {
 struct EventHandleEditionResponse {
     id: u32,
     name: String,
+    subtitle: String,
     start_date: chrono::NaiveDateTime,
     banner_img_url: String,
+    banner2_img_url: String,
     mx_id: i32,
     categories: Vec<Category>,
 }
 
 async fn event_list(req_id: RequestId, db: Data<Database>) -> RecordsResponse<impl Responder> {
-    let out = event::event_list(&db.mysql_pool)
+    let mysql_conn = &mut db.mysql_pool.acquire().await.with_api_err().fit(req_id)?;
+
+    let out = event::event_list(mysql_conn)
         .await
         .with_api_err()
         .fit(req_id)?;
@@ -134,7 +147,7 @@ async fn event_editions(
         .fit(req_id)?
         .id;
 
-    let res: Vec<EventHandleResponse> = sqlx::query_as(
+    let res: Vec<RawEventHandleResponse> = sqlx::query_as(
         "select ee.* from event_edition ee
         where ee.event_id = ?
             and (ee.event_id, ee.id) in (
@@ -147,7 +160,10 @@ async fn event_editions(
     .with_api_err()
     .fit(req_id)?;
 
-    json(res)
+    json(res.into_iter().map(|raw| EventHandleResponse {
+        subtitle: raw.subtitle.clone().unwrap_or_default(),
+        raw,
+    }).collect_vec())
 }
 
 #[derive(FromRow)]
@@ -279,8 +295,10 @@ async fn edition(
     json(EventHandleEditionResponse {
         id: edition.id,
         name: edition.name,
+        subtitle: edition.subtitle.unwrap_or_default(),
         start_date: edition.start_date,
         banner_img_url: edition.banner_img_url.unwrap_or_default(),
+        banner2_img_url: edition.banner2_img_url.unwrap_or_default(),
         mx_id: edition.mx_id.unwrap_or(-1),
         categories,
     })

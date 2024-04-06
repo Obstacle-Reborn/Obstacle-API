@@ -79,7 +79,8 @@ impl Event {
 
     async fn editions(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<EventEdition>> {
         let db = ctx.data_unchecked::<MySqlPool>();
-        let q = event::event_editions_list(db, &self.inner.handle).await?;
+        let mysql_conn = &mut db.acquire().await?;
+        let q = event::event_editions_list(mysql_conn, &self.inner.handle).await?;
         Ok(q.into_iter()
             .map(|inner| EventEdition {
                 event: Cow::Borrowed(self),
@@ -572,7 +573,7 @@ impl EventEdition<'_> {
             .inner
             .mx_id
             .map(|id| id.to_string())
-            .unwrap_or(format!("__{}__{}__", self.inner.event_id, self.inner.id));
+            .unwrap_or(event::event_edition_key(self.inner.event_id, self.inner.id));
         Some(Mappack { mappack_id })
     }
 
@@ -599,6 +600,10 @@ impl EventEdition<'_> {
 
     async fn name(&self) -> &str {
         &self.inner.name
+    }
+
+    async fn subtitle(&self) -> Option<&str> {
+        self.inner.subtitle.as_deref()
     }
 
     async fn start_date(&self) -> &chrono::NaiveDateTime {

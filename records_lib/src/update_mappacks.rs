@@ -148,7 +148,13 @@ async fn save(
 
             set_options.with_expiration(SetExpiry::EX(ex))
         }
-        None => set_options,
+        None => {
+            // Persist some keys btw
+            redis_conn.persist(mappack_key(mappack_id)).await?;
+            redis_conn.persist(mappack_lb_key(mappack_id)).await?;
+
+            set_options
+        }
     };
 
     // --- Save the number of maps of the campaign
@@ -158,6 +164,10 @@ async fn save(
         .arg(&set_options)
         .query_async(redis_conn)
         .await?;
+
+    if mappack_ttl.is_none() {
+        redis_conn.persist(&key).await?;
+    }
 
     #[cfg(feature = "tracing")]
     tracing::info!("Saved key: `{key}`");
@@ -172,6 +182,12 @@ async fn save(
         .arg(&set_options)
         .query_async(redis_conn)
         .await?;
+
+        if mappack_ttl.is_none() {
+            redis_conn
+                .persist(mappack_map_last_rank(mappack_id, &map.map_id))
+                .await?;
+        }
     }
 
     for score in scores.scores {
@@ -214,6 +230,19 @@ async fn save(
         if let Some(ttl) = mappack_ttl {
             redis_conn
                 .expire(mappack_player_ranks_key(mappack_id, score.player_id), ttl)
+                .await?;
+        } else {
+            redis_conn
+                .persist(mappack_player_ranks_key(mappack_id, score.player_id))
+                .await?;
+            redis_conn
+                .persist(mappack_player_rank_avg_key(mappack_id, score.player_id))
+                .await?;
+            redis_conn
+                .persist(mappack_player_map_finished_key(mappack_id, score.player_id))
+                .await?;
+            redis_conn
+                .persist(mappack_player_worst_rank_key(mappack_id, score.player_id))
                 .await?;
         }
 
