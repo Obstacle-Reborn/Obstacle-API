@@ -2,6 +2,7 @@ use std::{borrow::Cow, collections::HashMap, iter::repeat, sync::Arc};
 
 use async_graphql::{dataloader::Loader, Context, InputObject, MergedObject};
 use deadpool_redis::redis::AsyncCommands;
+use futures::StreamExt as _;
 use sqlx::{mysql, FromRow, MySqlPool, Row};
 
 use records_lib::{
@@ -505,6 +506,36 @@ impl EventEditionPlayer<'_> {
                 player: self,
             })
             .collect())
+    }
+
+    async fn unfinished_maps(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<Vec<EventEditionMapExt<'_>>> {
+        let db = ctx.data_unchecked::<MySqlPool>();
+
+        let mut unfinished_maps = sqlx::query_as(
+            "select m.* from maps m
+            inner join event_edition_maps eem on m.id = eem.map_id
+            left join global_records gr on m.id = gr.map_id and gr.record_player_id = ?
+            left join event_edition_records eer on gr.record_id = eer.record_id
+            where eem.event_id = ? and eem.edition_id = ? and gr.record_id is null",
+        )
+        .bind(self.player.id)
+        .bind(self.edition.inner.event_id)
+        .bind(self.edition.inner.id)
+        .fetch(db);
+
+        let mut out = Vec::with_capacity(unfinished_maps.size_hint().0);
+
+        while let Some(map) = unfinished_maps.next().await {
+            out.push(EventEditionMapExt {
+                edition_player: self,
+                inner: From::<models::Map>::from(map?),
+            });
+        }
+
+        Ok(out)
     }
 }
 
